@@ -1,7 +1,7 @@
 # xmake.js
 Chat GPT将xmake.sh (https://github.com/xmake-io/xmake.sh/blob/master/configure) 翻译为js代码
 
-## 使用下面的描述文字翻译
+## 使用下面的描述文字翻译，由于输出限制，需要重复分段输入
 ```
 将下面的bash代码翻译成ES6 JS代码， 运行环境为node.js，不修改变量名， 并且highlight：
 #!/bin/sh
