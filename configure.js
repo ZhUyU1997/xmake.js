@@ -19,12 +19,14 @@
 // @author      ruki
 //
 
-const fs = require('fs');
-const path = require('path');
-const child_process = require('child_process');
-const util = require('util')
-const exec = util.promisify(require('child_process').exec)
-const glob = require('glob');
+import fs from 'fs';
+import path, { dirname } from 'path';
+import { execaSync } from "execa"
+import fastGlob from 'fast-glob'
+import os from 'os';
+import tmp from 'tmp';
+import * as url from 'url';
+const __dirname = url.fileURLToPath(new URL('.', import.meta.url));
 
 const xmake_sh_projectdir = path.resolve(__dirname);
 const xmake_sh_buildir = 'build';
@@ -33,8 +35,17 @@ const xmake_sh_verbose = false;
 const xmake_sh_diagnosis = false;
 const xmake_sh_copyright = 'Copyright (C) 2022-present Ruki Wang, tboox.org, xmake.io.';
 
-let _loading_toolchains
+let _loading_toolchains = true
+let _loading_options = true
+let _loading_targets = true
+
+let xmake_sh_scriptdir
 let _xmake_sh_options = []
+let _xmake_sh_targets = ""
+let _xmake_sh_toolchains = ""
+let _xmake_sh_option_current;
+let _xmake_sh_target_current;
+let _xmake_sh_toolchain_current;
 
 let _install_prefix_default;
 let _install_bindir_default;
@@ -63,17 +74,17 @@ function print(...msg) {
 }
 
 const _test_z = (str) => {
-    if (`x${str}` === 'x') {
+    if (typeof str === "undefined" || str === "") {
         return true;
     }
     return false;
 }
 
 const _test_nz = (str) => {
-    if (`x${str}` !== 'x') {
-        return true;
+    if (typeof str === "undefined" || str === "") {
+        return false;
     }
-    return false;
+    return true;
 }
 
 const _test_eq = (str1, str2) => {
@@ -107,7 +118,7 @@ function string_split(str, sep, idx) {
 }
 
 function string_contains(str, substr) {
-    return str.indexOf(substr) !== -1 ? 0 : 1;
+    return str.indexOf(substr) !== -1 ? true : false;
 }
 
 // does startswith sub-string?
@@ -116,9 +127,9 @@ function string_contains(str, substr) {
 // string_startswith(str, "src")
 function string_startswith(str, subStr) {
     if (str.startsWith(subStr)) {
-        return 0;
+        return true;
     }
-    return 1;
+    return false;
 }
 
 // duplicate characters
@@ -148,51 +159,54 @@ function _os_tmpfile() {
 }
 
 // try run program
-function _os_runv(...cmd) {
-    let ok = 0;
+function _os_runv(program, ...args) {
+    let ok;
+
     if (xmake_sh_diagnosis) {
-        ok = execSync(cmd.join(' '));
+        ok = execaSync(program, args, { shell: true }).exitCode;
     } else {
-        ok = execSync(cmd.join(' '), { stdio: 'ignore' });
+        ok = execaSync(program, args, { shell: true, stdio: 'ignore' }).exitCode;
     }
+
     if (ok !== 0) {
-        return 1;
+        return false;
     }
-    return 0;
+    return true;
 }
 
 // try run program and get output
-function _os_iorunv(...cmd) {
+function _os_iorunv(program, ...args) {
     let tmpfile = _os_tmpfile();
-    let ok = 0;
-    let result = '';
+    let ok
+    let result;
+    const file = fs.createWriteStream(tmpfile)
+
     try {
-        result = execSync(cmd.join(' ') + ` > ${tmpfile} 2>&1`);
+        ok = execaSync(program, args, {
+            shell: true,
+            stdout: file,
+            stderr: file,
+        }).exitCode;
     } catch (error) {
         ok = 1;
     }
+    _os_tryrm(tmpfile);
+
     if (ok !== 0) {
         return '';
     }
     result = fs.readFileSync(tmpfile, 'utf8');
-    _os_tryrm(tmpfile);
     return result;
 }
 
 
 
 // find file in the given directory
-// e.g. _os_find . xmake.sh
-function _os_find(dir, name, depth) {
-    if (depth) {
-        if (is_host('macosx')) {
-            return `find ${dir} -depth ${depth} -name "${name}"`;
-        } else {
-            return `find ${dir} -maxdepth ${depth} -mindepth ${depth} -name "${name}"`;
-        }
-    } else {
-        return `find ${dir} -name "${name}"`;
-    }
+// e.g. _os_find . xmake.js
+const _os_find = (dir, name, depth) => {
+    return fastGlob.sync(`${dir}/**/${name}`, {
+        deep: depth
+    });
 }
 
 // get date, "%Y%m%d%H%M" -> 202212072222
@@ -201,69 +215,29 @@ function _os_date(format) {
     return date.toISOString().replace('T', ' ').replace(/\.[0-9]{3}Z$/, '');
 }
 
-function path_filename(path) {
-    const filename = path.split('/').pop();
-    return filename;
+function path_filename(str) {
+    return path.basename(str);
 }
 
-function path_extension(path) {
-    const filename = path_filename(path);
-    const extension = filename.split('.').pop();
-    return `.${extension}`;
+function path_extension(str) {
+    return path.extname(str);
 }
 
-function path_basename(path) {
-    const filename = path_filename(path);
-    const basename = filename.replace(/\.[^/.]+$/, '');
-    return basename;
+function path_basename(str) {
+    const result = path.parse(str)
+    return result.name
 }
 
-function path_directory(path) {
-    const dirname = path.split('/').slice(0, -1).join('/');
-    return dirname;
+function path_directory(str) {
+    return path.dirname(str);
 }
 
 function path_is_absolute(str) {
-    if (string_startswith(str, "/")) {
-        return 0;
-    }
-    return 1;
+    return path.isAbsolute(str)
 }
 
 function path_relative(source, target) {
-    let common_part = source;
-    let result = "";
-
-    while (_test_eq(target.substr(common_part), target)) {
-        // no match, means that candidate common part is not correct
-        // go up one level (reduce common part)
-        common_part = path.dirname(common_part);
-        // and record that we went back, with correct / handling
-        if (_test_z(result)) {
-            result = "..";
-        } else {
-            result = "../" + result;
-        }
-    }
-
-    if (_test_eq(common_part, "/")) {
-        // special case for root (no common path)
-        result = result + "/";
-    }
-
-    // since we now have identified the common part,
-    // compute the non-common part
-    let forward_part = target.substr(common_part);
-
-    // and now stick all parts together
-    if (_test_nz(result) && _test_nz(forward_part)) {
-        result = result + forward_part;
-    } else if (_test_nz(forward_part)) {
-        // remote extra '/', e.g. "/xxx" => "xxx"
-        result = forward_part.substr(1);
-    }
-
-    return result;
+    return path.relative(source, target);
 }
 
 function path_extensionstring_replace(str, replacement) {
@@ -373,61 +347,55 @@ const _get_flagname = (toolkind) => {
 function _is_enabled(value) {
     return ["true", "yes", "y"].includes(value);
 }
-const _map = name => {
-    eval(`_map_${name}_count=0`);
-    eval(`_map_${name}_keys=""`);
-};
+const maps = new Map(); // 用来存储所有映射的集合
 
-const _map_genkey = key => key.replace(/[/*.()+-\$]/g, "");
+// 返回给定名称的映射
+const _map = name => {
+    return maps.get(name);
+};
 
 const _map_count = name => eval(`_map_${name}_count`);
 
+// 返回给定名称的映射中指定 key 对应的值
 const _map_get = (name, key) => {
-    const value = eval(`_map_${name}_value_${key}`);
-    if (value === "__empty__") {
-        return "";
-    }
-    return value;
+    const map = maps.get(name);
+    if (!map) return undefined;
+    return map.get(key);
 };
 
+// 判断给定名称的映射中是否存在指定 key
 const _map_has = (name, key) => {
-    const value = eval(`_map_${name}_value_${key}`);
-    if (value) {
-        return 0;
-    }
-    return 1;
+    const map = maps.get(name);
+    if (!map) return false;
+    return map.has(key);
 };
 
+
+// 在给定名称的映射中设置指定 key 对应的值
 const _map_set = (name, key, value) => {
-    if (!_map_has(name, key)) {
-        const count = _map_count("options");
-        eval(`_map_${name}_count=${count + 1}`);
-        let keys = eval(`_map_${name}_keys`);
-        keys = `${keys} ${key}`;
-        eval(`_map_${name}_keys=${keys}`);
+    let map = maps.get(name);
+    if (!map) {
+        map = new Map();
+        maps.set(name, map);
     }
-    eval(`_map_${name}_value_${key}=${value}`);
+    map.set(key, value);
 };
 
+// 在给定名称的映射中移除指定 key
 const _map_remove = (name, key) => {
-    if (_map_has(name, key)) {
-        const count = _map_count("options");
-        eval(`_map_${name}_count=${count - 1}`);
-        eval(`_map_${name}_value_${key}=""`);
-        let keys = eval(`_map_${name}_keys`);
-        let keys_new = "";
-        for (let k of keys) {
-            if (k !== key) {
-                keys_new = `${keys_new} ${k}`;
-            }
-        }
-        eval(`_map_${name}_keys=${keys_new}`);
-    }
+    const map = maps.get(name);
+    if (!map) return;
+    map.delete(key);
 };
 
-const _map_keys = name => eval(`_map_${name}_keys`);
+// 返回给定名称的映射中所有 key 的数组
+const _map_keys = name => {
+    const map = maps.get(name);
+    if (!map) return [];
+    return Array.from(map.keys());
+};
 
-let os_host = require('os').hostname().toLowerCase();
+let os_host = os.type().toLowerCase();
 
 if (os_host.includes('cygwin')) {
     os_host = 'cygwin';
@@ -465,20 +433,9 @@ if (os_host.includes('bsd')) {
 function is_host(...hosts) {
     return hosts.includes(os_host);
 }
-const os = require('os');
 
 // detect host architecture
 const os_arch = os.arch().toLowerCase();
-
-// do something with os_arch here
-
-if (os_arch === 'x86') {
-    // do something for x86 architecture
-} else if (os_arch === 'x64') {
-    // do something for x64 architecture
-} else {
-    // do something for other architectures
-}
 
 // set the default target platform and architecture
 const _target_plat_default = os_host;
@@ -571,20 +528,20 @@ function set_project(name) {
     _xmake_sh_project_name = name
 }
 
-// include the given xmake.sh file or directory
+// include the given xmake.js file or directory
 // e.g. includes "src" "tests"
 function includes(...paths) {
     for (const path of paths) {
         if (fs.existsSync(path) && fs.statSync(path).isFile()) {
-            xmake_sh_scriptdir = path.dirname()
-            require(path)
+            xmake_sh_scriptdir = dirname(path)
+            eval(fs.readFileSync(path).toString())
         } else {
             const xmake_sh_scriptdir_cur = xmake_sh_scriptdir
             if (xmake_sh_scriptdir !== "") {
                 xmake_sh_scriptdir = `${xmake_sh_scriptdir_cur}/${path}`
-                require(`${xmake_sh_scriptdir}/xmake.sh`)
+                eval(fs.readFileSync(`${xmake_sh_scriptdir}/xmake.js`).toString())
             } else {
-                require(`${xmake_sh_projectdir}/${path}/xmake.sh`)
+                eval(fs.readFileSync(`${xmake_sh_projectdir}/${path}/xmake.js`).toString())
             }
             xmake_sh_scriptdir = xmake_sh_scriptdir_cur
         }
@@ -821,7 +778,7 @@ function _get_abstract_flag_for_gcc_clang(toolkind, toolname, itemname, value) {
 // get abstract flags
 const _get_abstract_flags = (toolkind, toolname, itemname, values) => {
     let flags = '';
-    for (const value of values.split(' ')) {
+    for (const value of values) {
         let flag = '';
         switch (toolname) {
             case 'gcc':
@@ -1082,6 +1039,9 @@ function target(name) {
     _map_set("targets", `${name}_name`, name);
     return 0;
 }
+
+globalThis.target = target
+
 function target_end() {
     _xmake_sh_target_current = "";
 }
@@ -1124,14 +1084,14 @@ function _set_target_item(name, key, value) {
 }
 
 // add values to the given target item
-function add_target_item(name, key, value) {
+function _add_target_item(name, key, value) {
     if (_test_nz(name)) {
         const values = _map_get("targets", `${name}_${key}`);
-        const newValues = `${values} ${value}`;
+        const newValues = typeof values === "undefined" ? value : `${values} ${value}`;
         _map_set("targets", `${name}_${key}`, newValues);
     } else {
         const values = _map_get("targets", `__root_${key}`);
-        const newValues = `${values} ${value}`;
+        const newValues = typeof values === "undefined" ? value : `${values} ${value}`;
         _map_set("targets", `__root_${key}`, newValues);
     }
 }
@@ -1140,11 +1100,11 @@ function _is_target_default(name) {
     if (_has_target_item(name, "default")) {
         const defaultValue = _get_target_item(name, "default");
         if (_is_enabled(defaultValue)) {
-            return 0;
+            return true;
         }
-        return 1;
+        return false;
     }
-    return 0;
+    return true;
 }
 
 function _get_target_basename(name) {
@@ -1250,7 +1210,7 @@ function _get_target_sourcefiles(name) {
 
 // 获取目标中的目标文件
 function _get_target_objectfile(name, sourcefile) {
-    const filename = path_filename(sourcefile);
+    let filename = path_filename(sourcefile);
     let extension = ".o";
     if (is_plat("mingw")) {
         extension = ".obj";
@@ -1262,9 +1222,10 @@ function _get_target_objectfile(name, sourcefile) {
 }
 
 const _get_target_objectfiles = (name) => {
-    const sourcefiles = _get_target_sourcefiles(name);
+    const sourcefiles = _get_target_sourcefiles(name) ?? "";
     let objectfiles = '';
-    sourcefiles.forEach((sourcefile) => {
+
+    sourcefiles.split(" ").forEach((sourcefile) => {
         const objectfile = _get_target_objectfile(name, sourcefile);
         objectfiles += `${objectfile}`;
     });
@@ -1273,7 +1234,7 @@ const _get_target_objectfiles = (name) => {
 
 const _get_target_values = (name, itemname) => {
     let values = _get_target_item(name, itemname);
-    const options = _get_target_item(name, 'options');
+    const options = _get_target_item(name, 'options') ?? [];
     options.forEach((option) => {
         if (has_config(option)) {
             const option_values = _get_option_item(option, itemname);
@@ -1288,7 +1249,7 @@ const _get_target_values = (name, itemname) => {
 // 获取目标抽象标志
 function _get_target_abstract_flags(name, toolkind, toolname, itemname, values) {
     if (_test_z(values)) {
-        values = _get_target_values(name, itemname);
+        values = _get_target_values(name, itemname) ?? [];
     }
     const flags = _get_abstract_flags(toolkind, toolname, itemname, values);
     return flags;
@@ -1345,8 +1306,8 @@ const _get_target_compiler_flags = (name, toolkind) => {
     }
 
     // get abstract flags
-    const itemnames = "symbols optimizes warnings languages defines undefines includedirs frameworkdirs frameworks";
-    for (const itemname of itemnames.split(" ")) {
+    const itemnames = ["symbols", "optimizes", "warnings", "languages", "defines", "undefines", "includedirs", "frameworkdirs", "frameworks"];
+    for (const itemname of itemnames) {
         const flags = _get_target_abstract_flags(name, toolkind, toolname, itemname);
         if (_test_nz(flags)) {
             result = `${result} ${flags}`;
@@ -1387,8 +1348,8 @@ function _get_target_linker_flags(name, toolkind) {
     }
 
     // get flags from target deps
-    const deps = _get_target_item(name, "deps");
-    deps.split(' ').forEach(dep => {
+    const deps = _get_target_item(name, "deps") ?? [];
+    deps.forEach(dep => {
         const dep_kind = _get_target_item(dep, "kind");
         if (_test_eq(dep_kind, "static") || _test_eq(dep_kind, "shared")) {
             const dep_targetdir = _get_targetdir(dep);
@@ -1468,8 +1429,8 @@ function _get_target_flags(name, toolkind) {
 const _add_target_filepaths = (key, ...files) => {
     // we need avoid escape * automatically in for-loop
     const list = files.map(file => file.replace(/\*/g, "?"));
-    for (const file of list) {
-        file = file.replace(/?/g, "");
+    for (let file of list) {
+        file = file.replace(/\?/g, "");
         if (!path_is_absolute(file)) {
             file = `${xmake_sh_scriptdir}/${file}`;
         }
@@ -1478,14 +1439,15 @@ const _add_target_filepaths = (key, ...files) => {
             const dir = path_directory(file);
             const name = path_filename(file);
             files = _os_find(dir, name);
-        } else if (string_contains(file, "")) {
+        } else if (string_contains(file, "*")) {
             const dir = path_directory(file);
             const name = path_filename(file);
             files = _os_find(dir, name, 1);
         } else {
-            files = file;
+            files = [file];
         }
-        for (const file of files) {
+
+        for (let file of files) {
             file = path_relative(xmake_sh_projectdir, file);
             _add_target_item(_xmake_sh_target_current, key, file);
         }
@@ -1547,6 +1509,8 @@ function set_kind(kind) {
     }
     _set_target_item(_xmake_sh_target_current, "kind", kind);
 }
+
+globalThis.set_kind = set_kind
 
 // set version in target
 function set_version(version, version_build) {
@@ -1652,45 +1616,46 @@ const add_deps = function () {
 };
 
 // add options in target
-const add_options = function () {
+const add_options = function (...args) {
     if (!_loading_targets) {
         return;
     }
-    for (let option of arguments) {
+    for (let option of args) {
         _add_target_item(_xmake_sh_target_current, "options", option);
     }
 };
 
 // add files in target
-const add_files = function () {
+const add_files = function (...args) {
     if (!_loading_targets) {
         return;
     }
-    _add_target_filepaths("files", ...arguments);
+    _add_target_filepaths("files", ...args);
 };
+globalThis.add_files = add_files
 
 // add install files in target
-const add_installfiles = function () {
+const add_installfiles = function (...args) {
     if (!_loading_targets) {
         return;
     }
-    _add_target_installpaths("installfiles", ...arguments);
+    _add_target_installpaths("installfiles", ...args);
 };
 
 // add header files in target
-const add_headerfiles = function () {
+const add_headerfiles = function (...args) {
     if (!_loading_targets) {
         return;
     }
-    _add_target_installpaths("headerfiles", ...arguments);
+    _add_target_installpaths("headerfiles", ...args);
 };
 
 // add config files in target
-const add_configfiles = function () {
+const add_configfiles = function (...args) {
     if (!_loading_targets) {
         return;
     }
-    _add_target_filepaths("configfiles", ...arguments);
+    _add_target_filepaths("configfiles", ...args);
 };
 
 // add defines in target
@@ -1974,6 +1939,7 @@ function toolchain(name) {
     _map_set('toolchains', `${name}_name`, name);
     return 0;
 }
+
 function toolchain_end() {
     _xmake_sh_toolchain_current = '';
 }
@@ -2053,15 +2019,12 @@ function _load_options_and_toolchains() {
     _loading_options = true;
     _loading_toolchains = true;
     _loading_targets = false;
-    let file = xmake_sh_projectdir + '/xmake.sh';
+    let file = xmake_sh_projectdir + '/xmake.js';
     if (fs.existsSync(file)) {
         includes(file);
     } else {
         // 包含下一个子目录中的所有xmake.sh文件
-        let files = glob.sync(`${xmake_sh_projectdir}/**/xmake.sh`, {
-            maxDepth: 2,
-            minDepth: 2,
-        });
+        let files = fastGlob.sync(`${xmake_sh_projectdir}/**/xmake.js`, { deep: 2 });
         for (const file of files) {
             includes(file);
         }
@@ -2160,9 +2123,9 @@ let _target_toolchain;
 let _make_program;
 let _ninja_program;
 
-// show xmake.sh version
+// show xmake.js version
 function _show_version() {
-    console.log(`xmake.sh v${xmake_sh_version}, A script-only build utility like autotools`);
+    console.log(`xmake.js v${xmake_sh_version}, A script-only build utility like autotools`);
     console.log(xmake_sh_copyright);
     console.log('                         _               _            ');
     console.log("    __  ___ __  __  __ _| | ______   ___| |__         ");
@@ -2256,15 +2219,10 @@ while (args.length !== 0) {
 }
 
 const _check_platform = () => {
-    if (`x${_target_plat}` === "x") {
-        _target_plat = _target_plat_default;
-    }
-    if (`x${_target_arch}` === "x") {
-        _target_arch = _target_arch_default;
-    }
-    if (`x${_target_mode}` === "x") {
-        _target_mode = _target_mode_default;
-    }
+    _target_plat = _target_plat || _target_plat_default;
+    _target_arch = _target_arch || _target_arch_default;
+    _target_mode = _target_mode || _target_mode_default;
+
     console.log(`checking for platform ... ${_target_plat}`);
     console.log(`checking for architecture ... ${_target_arch}`);
 }
@@ -2328,7 +2286,7 @@ const _toolchain_linkcmd = (toolkind, binaryfile, objectfiles, flags) => {
             linkcmd = _toolchain_linkcmd_for_ar(toolkind, program, binaryfile, objectfiles, flags);
             break;
         default:
-            raise("unknown toolname(${toolname})!");
+            raise(`unknown toolname(${toolname})!`);
             break;
     }
     return linkcmd;
@@ -2336,79 +2294,83 @@ const _toolchain_linkcmd = (toolkind, binaryfile, objectfiles, flags) => {
 
 const _toolchain_try_make = (program) => {
     if (_os_runv(program, "--version")) {
-        return 0;
+        return true;
     }
-    return 1;
+    return false;
 };
 
 const _toolchain_try_ninja = (program) => {
     if (_os_runv(program, "--version")) {
-        return 0;
+        return true;
     }
-    return 1;
+    return false;
 };
 
 let _toolchain_try_gcc_result = "";
 const _toolchain_try_gcc = (kind, program) => {
     if (_toolchain_try_gcc_result === "ok") {
-        return 0;
+        return true;
     } else if (_toolchain_try_gcc_result === "no") {
-        return 1;
+        return false;
     }
     if (_os_runv(program, "--version")) {
         _toolchain_try_gcc_result = "ok";
-        return 0;
+        return true;
     }
     _toolchain_try_gcc_result = "no";
-    return 1;
+    return false;
 };
 
+let _toolchain_try_gxx_result = ""
 // try g++
 function _toolchain_try_gxx(kind, program) {
     if (_toolchain_try_gxx_result === "ok") {
-        return 0;
+        return true;
     } else if (_toolchain_try_gxx_result === "no") {
-        return 1;
+        return false;
     }
     if (_os_runv(`${program} --version`)) {
         _toolchain_try_gxx_result = "ok";
-        return 0;
+        return true;
     }
     _toolchain_try_gxx_result = "no";
-    return 1;
+    return false;
 
 }
 
+let _toolchain_try_clang_result = ""
 // try clang
 function _toolchain_try_clang(kind, program) {
     if (_toolchain_try_clang_result === "ok") {
-        return 0;
+        return true;
     } else if (_toolchain_try_clang_result === "no") {
-        return 1;
+        return false;
     }
 
     if (_os_runv(`${program} --version`)) {
         _toolchain_try_clang_result = "ok";
-        return 0;
+        return true;
     }
     _toolchain_try_clang_result = "no";
-    return 1;
+    return false;
 
 }
+
+let _toolchain_try_clangxx_result = ""
 
 // try clang++
 function _toolchain_try_clangxx(kind, program) {
     if (_toolchain_try_clangxx_result === "ok") {
-        return 0;
+        return true;
     } else if (_toolchain_try_clangxx_result === "no") {
-        return 1;
+        return false;
     }
     if (_os_runv(`${program} --version`)) {
         _toolchain_try_clangxx_result = "ok";
-        return 0;
+        return true;
     }
     _toolchain_try_clangxx_result = "no";
-    return 1;
+    return false;
 
 }
 
@@ -2417,21 +2379,15 @@ const _toolchain_try_ar = (kind, program) => {
     let tmpfile = _os_tmpfile();
     let objectfile = `${tmpfile}.o`;
     let libraryfile = `${tmpfile}.a`;
-    echo("", objectfile);
+    fs.writeFileSync(objectfile, "");
 
     // try linking it
-    let ok = false;
-    if (_os_runv(program, "-cr", libraryfile, objectfile)) {
-        ok = true;
-    }
+    let ok = _os_runv(program, "-cr", libraryfile, objectfile)
 
     // remove files
     _os_tryrm(objectfile);
     _os_tryrm(libraryfile);
-    if (ok) {
-        return 0;
-    }
-    return 1;
+    return ok;
 }
 
 const _toolchain_try_program = (toolchain, kind, program) => {
@@ -2459,22 +2415,23 @@ const _toolchain_try_program = (toolchain, kind, program) => {
     }
     if (ok) {
         vprint(`checking for ${program} ... ok`);
-        return 0;
+        return true;
     }
     vprint(`checking for ${program} ... no`);
-    return 1;
+    return false;
 }
 
 const _toolchain_try_toolset = (toolchain, kind, description) => {
     let programs = _get_toolchain_toolset(toolchain, kind);
-    for (let program of programs) {
+
+    for (let program of programs.split(' ')) {
         if (_toolchain_try_program(toolchain, kind, program)) {
             _set_toolchain_toolset(toolchain, kind, program);
             console.log(`checking for the ${description} (${kind}) ... ${program}`);
-            return 0;
+            return true;
         }
     }
-    return 1;
+    return false;
 }
 
 // try toolchain
@@ -2488,16 +2445,15 @@ function _toolchain_try(toolchain) {
         _toolchain_try_toolset(toolchain, 'ld', 'linker') &&
         _toolchain_try_toolset(toolchain, 'ar', 'static library archiver') &&
         _toolchain_try_toolset(toolchain, 'sh', 'shared library linker')) {
-        return 0;
+        return true;
     }
-    return 1;
+    return false;
 }
 
 // detect make
 function _toolchain_detect_make() {
-    if (test === 'x${_make_program}') {
-        _make_program = _make_program_default;
-    }
+    _make_program = _make_program || _make_program_default;
+
     if (_toolchain_try_make(_make_program)) {
         console.log('checking for make ... ok');
     } else {
@@ -2508,9 +2464,8 @@ function _toolchain_detect_make() {
 
 // detect ninja
 function _toolchain_detect_ninja() {
-    if (test === 'x${_ninja_program}') {
-        _ninja_program = _ninja_program_default;
-    }
+    _ninja_program = _ninja_program || _ninja_program_default;
+
     if (_toolchain_try_ninja(_ninja_program)) {
         console.log('checking for ninja ... ok');
     } else {
@@ -2521,9 +2476,9 @@ function _toolchain_detect_ninja() {
 
 // detect build backend
 function _toolchain_detect_backend() {
-    if (test === 'x${_project_generator}') {
+    if (_project_generator === "gmake") {
         _toolchain_detect_make();
-    } else if (test === 'x${_project_generator}') {
+    } else if (_project_generator === 'ninja') {
         _toolchain_detect_ninja();
     }
 }
@@ -2532,15 +2487,15 @@ function _toolchain_detect_backend() {
 function _toolchain_detect(toolchains) {
     // detect build backend
     _toolchain_detect_backend();
-
     // detect toolchains
-    if (test === 'x${toolchains}') {
+    if (typeof toolchains === "undefined" || toolchains === '') {
         if (is_plat('macosx')) {
             toolchains = 'clang gcc';
         } else {
             toolchains = 'gcc clang';
         }
     }
+
     for (const toolchain of toolchains.split(' ')) {
         if (_toolchain_try(toolchain)) {
             _target_toolchain = toolchain;
@@ -2552,9 +2507,10 @@ function _toolchain_detect(toolchains) {
 const _check_toolchain = () => {
     const toolchain = _target_toolchain;
     _target_toolchain = "";
+
     _toolchain_detect(toolchain);
 
-    if (`x${_target_toolchain}` !== "x") {
+    if (_test_nz(_target_toolchain)) {
         console.log(`checking for toolchain ... ${_target_toolchain}`);
     } else {
         console.log("checking for toolchain ... no");
@@ -2785,12 +2741,12 @@ const _load_targets = () => {
     _xmake_sh_option_current = "";
     _xmake_sh_target_current = "";
     _xmake_sh_toolchain_current = "";
-    const file = `${xmake_sh_projectdir}/xmake.sh`;
+    const file = `${xmake_sh_projectdir}/xmake.js`;
     if (fs.existsSync(file)) {
         includes(file);
     } else {
-        // include all xmake.sh files in next sub-directories
-        const files = _os_find(`${xmake_sh_projectdir}`, "xmake.sh", 2);
+        // include all xmake.js files in next sub-directories
+        const files = _os_find(`${xmake_sh_projectdir}`, "xmake.js", 2);
         files.forEach((file) => {
             includes(file);
         });
@@ -2946,8 +2902,8 @@ function _generate_configfile(target, configfile_in) {
 
 // generate configfiles
 function _generate_configfiles() {
-    for (const target of _xmake_sh_targets) {
-        const configfiles = _get_target_item(target, "configfiles");
+    for (const target of _xmake_sh_targets.trim().split(' ')) {
+        const configfiles = _get_target_item(target, "configfiles") ?? [];
         for (const configfile of configfiles) {
             _generate_configfile(target, configfile);
         }
@@ -2965,8 +2921,9 @@ function _gmake_begin() {
 
 function _gmake_add_header() {
     fs.writeFileSync(`${xmake_sh_projectdir}/Makefile`, `# this is the build file for this project
-# it is autogenerated by the xmake.sh build system.
+# it is autogenerated by the xmake.js build system.
 # do not edit by hand.
+
 `, { encoding: "utf8" });
 }
 
@@ -2979,42 +2936,40 @@ endif
 }
 
 function _gmake_add_flags() {
-    const kinds = "cc cxx as mm mxx ld sh ar";
-    for (const target of _xmake_sh_targets) {
+    const kinds = ["cc", "cxx", "as", "mm", "mxx", "ld", "sh", "ar"]
+    for (const target of _xmake_sh_targets.trim().split(' ')) {
         for (const kind of kinds) {
             const flags = _get_target_flags(target, kind);
             const flagname = _get_flagname(kind);
-            fs.appendFileSync(`${xmake_sh_projectdir}/Makefile`, `${string_toupper(`${target}_${flagname}`)}=${flags}
-`, { encoding: "utf8" });
+            fs.appendFileSync(`${xmake_sh_projectdir}/Makefile`, `${string_toupper(`${target}_${flagname}`)}=${flags}\n`, { encoding: "utf8" });
         }
         fs.appendFileSync(`${xmake_sh_projectdir}/Makefile`, "\n", { encoding: "utf8" });
     }
 }
 
 function _gmake_add_toolchains() {
-    const kinds = "cc cxx as mm mxx ld sh ar";
+    const kinds = ["cc", "cxx", "as", "mm", "mxx", "ld", "sh", "ar"];
     for (const kind of kinds) {
         const program = _get_toolchain_toolset(_target_toolchain, kind);
-        fs.appendFileSync(`${xmake_sh_projectdir}/Makefile`, `${string_toupper(kind)}=${program}
-`, { encoding: "utf8" });
+        fs.appendFileSync(`${xmake_sh_projectdir}/Makefile`, `${string_toupper(kind)}=${program}\n`, { encoding: "utf8" });
     }
     fs.appendFileSync(`${xmake_sh_projectdir}/Makefile`, "\n", { encoding: "utf8" });
 }
 
-_gmake_add_build_object_for_gcc_clang = (kind, sourcefile, objectfile, flagname) => {
+const _gmake_add_build_object_for_gcc_clang = (kind, sourcefile, objectfile, flagname) => {
     const objectdir = path_directory(objectfile);
-    print(`\t@mkdir -p ${objectdir}`);
-    print(`\t$(V)$(${kind}) -c $(${flagname}) -o ${objectfile} ${sourcefile}`);
+    fs.appendFileSync(`${xmake_sh_projectdir}/Makefile`, `\t@mkdir -p ${objectdir}\n`);
+    fs.appendFileSync(`${xmake_sh_projectdir}/Makefile`, `\t$(V)$(${string_toupper(kind)}) -c $(${flagname}) -o ${objectfile} ${sourcefile}\n`);
 }
 
-_gmake_add_build_object = (target, sourcefile, objectfile) => {
+const _gmake_add_build_object = (target, sourcefile, objectfile) => {
     const sourcekind = path_sourcekind(sourcefile);
     const program = _get_toolchain_toolset(_target_toolchain, sourcekind);
     const toolname = path_toolname(program);
-    const flagname = _get_flagname(sourcekind);
+    let flagname = _get_flagname(sourcekind);
     flagname = string_toupper(`${target}_${flagname}`);
-    echo(`${objectfile}: ${sourcefile}`);
-    print(`\t@echo compiling.${_target_mode} ${sourcefile}`);
+    fs.appendFileSync(`${xmake_sh_projectdir}/Makefile`, `${objectfile}: ${sourcefile}\n`);
+    fs.appendFileSync(`${xmake_sh_projectdir}/Makefile`, `\t@echo compiling.${_target_mode} ${sourcefile}\n`);
     switch (toolname) {
         case "gcc":
             _gmake_add_build_object_for_gcc_clang(sourcekind, sourcefile, objectfile, flagname);
@@ -3031,33 +2986,33 @@ _gmake_add_build_object = (target, sourcefile, objectfile) => {
         default:
             raise("unknown toolname(${toolname})!");
     }
-    echo("");
+    fs.appendFileSync(`${xmake_sh_projectdir}/Makefile`, "\n");
 }
 
-_gmake_add_build_objects = (target) => {
+const _gmake_add_build_objects = (target) => {
     const sourcefiles = _get_target_sourcefiles(target);
-    for (const sourcefile of sourcefiles) {
+    for (const sourcefile of sourcefiles.split(" ")) {
         const objectfile = _get_target_objectfile(target, sourcefile);
         _gmake_add_build_object(target, sourcefile, objectfile);
     }
 }
 
-_gmake_add_build_target_for_gcc_clang = (kind, targetfile, objectfiles, flagname) => {
+const _gmake_add_build_target_for_gcc_clang = (kind, targetfile, objectfiles, flagname) => {
     const targetdir = path_directory(targetfile);
-    print(`\t@mkdir -p ${targetdir}`);
-    print(`\t$(V)$(${kind}) -o ${targetfile} ${objectfiles} $(${flagname})`);
+    fs.appendFileSync(`${xmake_sh_projectdir}/Makefile`, `\t@mkdir -p ${targetdir}\n`);
+    fs.appendFileSync(`${xmake_sh_projectdir}/Makefile`, `\t$(V)$(${string_toupper(kind)}) -o ${targetfile} ${objectfiles} $(${flagname})\n`);
 }
 
-_gmake_add_build_target_for_ar = (kind, targetfile, objectfiles, flagname) => {
+const _gmake_add_build_target_for_ar = (kind, targetfile, objectfiles, flagname) => {
     const targetdir = path_directory(targetfile);
-    print(`\t@mkdir -p ${targetdir}`);
-    print(`\t$(V)$(${kind}) crs ${targetfile} ${objectfiles} $(${flagname})`);
+    fs.appendFileSync(`${xmake_sh_projectdir}/Makefile`, `\t@mkdir -p ${targetdir}\n`);
+    fs.appendFileSync(`${xmake_sh_projectdir}/Makefile`, `\t$(V)$(${string_toupper(kind)}) crs ${targetfile} ${objectfiles} $(${flagname})\n`);
 }
 
 function _gmake_add_build_target(target) {
     const targetdir = _get_targetdir(target);
     const targetfile = _get_target_file(target);
-    const deps = _get_target_item(target, "deps");
+    const deps = _get_target_item(target, "deps") ?? "";
     const objectfiles = _get_target_objectfiles(target);
 
     // get linker
@@ -3081,13 +3036,13 @@ function _gmake_add_build_target(target) {
     const toolname = path_toolname(program);
 
     // get linker flags
-    const flagname = _get_flagname(toolkind);
+    let flagname = _get_flagname(toolkind);
     flagname = string_toupper(target + "_" + flagname);
 
     // link target
-    echo(target + ": " + targetfile + " >> " + xmake_sh_projectdir + "/Makefile");
-    echo(targetfile + ": " + deps + objectfiles + " >> " + xmake_sh_projectdir + "/Makefile");
-    print("\t@echo linking." + _target_mode + " " + targetfile + " >> " + xmake_sh_projectdir + "/Makefile");
+    fs.appendFileSync(`${xmake_sh_projectdir}/Makefile`, `${target}: ${targetfile}\n`);
+    fs.appendFileSync(`${xmake_sh_projectdir}/Makefile`, `${targetfile}: ${deps}${objectfiles}\n`);
+    fs.appendFileSync(`${xmake_sh_projectdir}/Makefile`, `\t@echo linking.${_target_mode} ${targetfile}\n`);
     switch (toolname) {
         case "gcc":
             _gmake_add_build_target_for_gcc_clang(toolkind, targetfile, objectfiles, flagname);
@@ -3108,7 +3063,7 @@ function _gmake_add_build_target(target) {
             raise("unknown toolname(" + toolname + ")!");
             break;
     }
-    echo(" >> " + xmake_sh_projectdir + "/Makefile");
+    fs.appendFileSync(`${xmake_sh_projectdir}/Makefile`, `\n`);
 
     // build objects
     _gmake_add_build_objects(target);
@@ -3116,18 +3071,18 @@ function _gmake_add_build_target(target) {
 
 const _gmake_add_build_targets = () => {
     let defaults = "";
-    for (const target of _xmake_sh_targets) {
+    for (const target of _xmake_sh_targets.trim().split(' ')) {
         if (_is_target_default(target)) {
             defaults += ` ${target}`;
         }
     }
-    echo(`default:${defaults} >> "${xmake_sh_projectdir}/Makefile"`);
-    echo(`all:${_xmake_sh_targets} >> "${xmake_sh_projectdir}/Makefile"`);
-    echo(".PHONY: default all >> ${xmake_sh_projectdir}/Makefile");
-    echo(" >> ${xmake_sh_projectdir}/Makefile");
-    for (const target of _xmake_sh_targets) {
+    fs.appendFileSync(`${xmake_sh_projectdir}/Makefile`, `default:${defaults}\n`);
+    fs.appendFileSync(`${xmake_sh_projectdir}/Makefile`, `all:${_xmake_sh_targets}\n`);
+    fs.appendFileSync(`${xmake_sh_projectdir}/Makefile`, `.PHONY: default all\n`);
+    fs.appendFileSync(`${xmake_sh_projectdir}/Makefile`, "\n");
+    _xmake_sh_targets.trim().split(' ').forEach(target => {
         _gmake_add_build_target(target);
-    }
+    });
 };
 
 const _gmake_add_build = () => {
@@ -3136,24 +3091,26 @@ const _gmake_add_build = () => {
 
 const _gmake_add_run_target = (target) => {
     const targetfile = _get_target_file(target);
-    print(`\t@${targetfile} >> "${xmake_sh_projectdir}/Makefile"`);
+    fs.appendFileSync(`${xmake_sh_projectdir}/Makefile`, `\t@${targetfile}\n`);
 };
 
 const _gmake_add_run_targets = () => {
-    let targets = "";
-    for (const target of _xmake_sh_targets) {
+    let targets = [];
+    for (const target of _xmake_sh_targets.trim().split(' ')) {
         const kind = _get_target_item(target, "kind");
-        if (test("x${kind}" === "xbinary")) {
+        if (kind === "binary") {
             if (_is_target_default(target)) {
-                targets += ` ${target}`;
+                targets.push(target);
             }
         }
     }
-    echo(`run:${targets} >> "${xmake_sh_projectdir}/Makefile"`);
+    fs.appendFileSync(`${xmake_sh_projectdir}/Makefile`, `run: ${targets}\n`);
+
     for (const target of targets) {
         _gmake_add_run_target(target);
     }
-    echo(" >> ${xmake_sh_projectdir}/Makefile");
+
+    fs.appendFileSync(`${xmake_sh_projectdir}/Makefile`, `\n`);
 };
 
 const _gmake_add_run = () => {
@@ -3163,20 +3120,20 @@ const _gmake_add_run = () => {
 const _gmake_add_clean_target = (target) => {
     const targetfile = _get_target_file(target);
     const objectfiles = _get_target_objectfiles(target);
-    print(`\t@rm ${targetfile} >> "${xmake_sh_projectdir}/Makefile"`);
-    for (const objectfile of objectfiles) {
-        print(`\t@rm ${objectfile} >> "${xmake_sh_projectdir}/Makefile"`);
+    fs.appendFileSync(`${xmake_sh_projectdir}/Makefile`, `\t@rm ${targetfile}\n`);
+    for (const objectfile of objectfiles.split(" ")) {
+        fs.appendFileSync(`${xmake_sh_projectdir}/Makefile`, `\t@rm ${objectfile}\n`);
     }
 };
 
 function _gmake_add_clean_targets() {
-    const targets = "";
-    for (const target of _xmake_sh_targets) {
+    let targets = [];
+    for (const target of _xmake_sh_targets.trim().split(' ')) {
         if (_is_target_default(target)) {
-            targets += ` ${target}`;
+            targets.push(target);
         }
     }
-    fs.appendFileSync(`${xmake_sh_projectdir}/Makefile`, `clean:${targets}\n`);
+    fs.appendFileSync(`${xmake_sh_projectdir}/Makefile`, `clean: ${targets.join(" ")}\n`);
     for (const target of targets) {
         _gmake_add_clean_target(target);
     }
@@ -3198,11 +3155,11 @@ function _gmake_add_install_target(target) {
     // install target file
     const targetkind = _get_target_item(target, "kind");
     if (_test_eq(targetkind, "binary")) {
-        print(`\t@mkdir -p ${installdir}/${_install_bindir_default}` >> `${xmake_sh_projectdir}/Makefile`);
-        print(`\t@cp -p ${targetfile} ${installdir}/${_install_bindir_default}/${filename}` >> `${xmake_sh_projectdir}/Makefile`);
+        fs.appendFileSync(`${xmake_sh_projectdir}/Makefile`, `\t@mkdir -p ${installdir}/${_install_bindir_default}\n`);
+        fs.appendFileSync(`${xmake_sh_projectdir}/Makefile`, `\t@cp -p ${targetfile} ${installdir}/${_install_bindir_default}/${filename}\n`);
     } else if (_test_eq(targetkind, "static") || _test_eq(targetkind, "shared")) {
-        print(`\t@mkdir -p ${installdir}/${_install_libdir_default}` >> `${xmake_sh_projectdir}/Makefile`);
-        print(`\t@cp -p ${targetfile} ${installdir}/${_install_libdir_default}/${filename}` >> `${xmake_sh_projectdir}/Makefile`);
+        fs.appendFileSync(`${xmake_sh_projectdir}/Makefile`, `\t@mkdir -p ${installdir}/${_install_libdir_default}\n`);
+        fs.appendFileSync(`${xmake_sh_projectdir}/Makefile`, `\t@cp -p ${targetfile} ${installdir}/${_install_libdir_default}/${filename}\n`);
     }
 
     // install header files
@@ -3224,8 +3181,8 @@ function _gmake_add_install_target(target) {
                 dstheaderfile = `${dstheaderdir}/${subfile}`;
             }
             dstheaderdir = path_directory(dstheaderfile);
-            print(`\t@mkdir -p ${dstheaderdir}` >> `${xmake_sh_projectdir}/Makefile`);
-            print(`\t@cp -p ${srcheaderfile} ${dstheaderfile}` >> `${xmake_sh_projectdir}/Makefile`);
+            fs.appendFileSync(`${xmake_sh_projectdir}/Makefile`, `\t@mkdir -p ${dstheaderdir}\n`);
+            fs.appendFileSync(`${xmake_sh_projectdir}/Makefile`, `\t@cp -p ${srcheaderfile} ${dstheaderfile}\n`);
         }
     }
     // 安装用户文件
@@ -3246,20 +3203,20 @@ function _gmake_add_install_target(target) {
                 dstinstallfile = `${dstinstalldir}/${subfile}`;
             }
             dstinstalldir = path_directory(dstinstallfile);
-            print(`\t@mkdir -p ${dstinstalldir}` >> "${xmake_sh_projectdir}/Makefile");
-            print(`\t@cp -p ${srcinstallfile} ${dstinstallfile}` >> "${xmake_sh_projectdir}/Makefile");
+            fs.appendFileSync(`${xmake_sh_projectdir}/Makefile`, `\t@mkdir -p ${dstinstalldir}\n`);
+            fs.appendFileSync(`${xmake_sh_projectdir}/Makefile`, `\t@cp -p ${srcinstallfile} ${dstinstallfile}\n`);
         }
     }
 }
 
 const _gmake_add_install_targets = () => {
-    let targets = "";
-    for (const target of _xmake_sh_targets) {
+    let targets = [];
+    for (const target of _xmake_sh_targets.trim().split(' ')) {
         if (_is_target_default(target)) {
-            targets += `${target}`;
+            targets.push(target);
         }
     }
-    fs.appendFileSync(`${xmake_sh_projectdir}/Makefile`, `install:${targets}\n`);
+    fs.appendFileSync(`${xmake_sh_projectdir}/Makefile`, `install: ${targets.join(" ")}\n`);
     for (const target of targets) {
         _gmake_add_install_target(target);
     }
@@ -3301,9 +3258,9 @@ function _generate_for_ninja() {
 //
 
 function _generate_build_file() {
-    if (`x${_project_generator}` === "xgmake") {
+    if (_project_generator === "gmake") {
         _generate_for_gmake();
-    } else if (`x${_project_generator}` === "xninja") {
+    } else if (_project_generator === "ninja") {
         _generate_for_ninja();
     } else {
         throw new Error(`unknown generator: ${_project_generator}`);
