@@ -11,12 +11,11 @@
   "author": "",
   "license": "ISC",
   "dependencies": {
+    "dayjs": "^1.11.7",
     "execa": "^6.1.0",
     "fast-glob": "^3.2.12",
     "glob": "^8.0.3",
     "install": "^0.13.0",
-    "tmp": "^0.2.1",
-    "tsx": "^3.12.1",
-    "vite-node": "^0.25.6"
+    "tmp": "^0.2.1"
   }
 }

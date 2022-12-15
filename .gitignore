@@ -1,1 +1,14 @@
+# Xmake cache
+.xmake/
+build/
+configure.log
+
+# Makefile
+Makefile
+makefile
+build.ninja
+
+# MacOS Cache
+.DS_Store
+
 node_modules
