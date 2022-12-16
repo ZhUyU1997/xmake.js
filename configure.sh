@@ -23,10 +23,11 @@
 #
 xmake_sh_projectdir=$(X= cd -- "$(dirname -- "$0")" && pwd -P)
 xmake_sh_buildir="build"
-xmake_sh_version="1.0.2"
+xmake_sh_version="1.0.3"
 xmake_sh_verbose=false
 xmake_sh_diagnosis=false
 xmake_sh_copyright="Copyright (C) 2022-present Ruki Wang, tboox.org, xmake.io."
+xmake_sh_makefile="${xmake_sh_projectdir}/makefile"
 
 #-----------------------------------------------------------------------------
 # some helper functions
@@ -109,11 +110,17 @@ string_split() {
             1) _ret="$1";;
             2) _ret="$2";;
             3) _ret="$3";;
+            4) _ret="$4";;
+            5) _ret="$5";;
+            6) _ret="$6";;
         esac
     else
         _ret="$1"
         _ret2="$2"
         _ret3="$3"
+        _ret4="$4"
+        _ret5="$5"
+        _ret6="$6"
     fi
     IFS="${oldifs}"
 }
@@ -272,6 +279,9 @@ path_basename() {
 # we avoid use `dirname -- ${1}`, because it's too slow
 path_directory() {
     local path="${1}"
+    if test_z "${path}"; then
+        raise "invalid empty path in path_directory()."
+    fi
     local oldifs="${IFS}"
     IFS='/'
     set -- ${path}
@@ -316,27 +326,40 @@ path_is_absolute() {
 
 # get relative path, e.g $(path_relative ${rootdir} ${absolute_path}`
 path_relative() {
-    local source=$1
-    local target=$2
+    local source="${1}"
+    local target="${2}"
+    if test_z "${source}" || test_z "${target}"; then
+        raise "invalid empty path in path_relative()"
+    fi
 
-    local common_part=$source
+    # patch missing "./"
+    source=${source#./}
+    source=${source#.}
+    target=${target#./}
+    target=${target#.}
+    if test_z "${source}"; then
+        _ret="${target}"
+        return
+    fi
+
+    # find common path
     local result=""
-
+    local common_part=$source
     while test_eq "${target#$common_part}" "${target}"; do
         # no match, means that candidate common part is not correct
         # go up one level (reduce common part)
         path_directory "${common_part}"; common_part="${_ret}"
         # and record that we went back, with correct / handling
-        if test_z $result; then
+        if test_z "${result}"; then
             result=".."
         else
-            result="../$result"
+            result="../${result}"
         fi
     done
 
-    if test_eq $common_part "/"; then
+    if test_eq "${common_part}" "/"; then
         # special case for root (no common path)
-        result="$result/"
+        result="${result}/"
     fi
 
     # since we now have identified the common part,
@@ -344,14 +367,18 @@ path_relative() {
     local forward_part="${target#$common_part}"
 
     # and now stick all parts together
-    if test_nz $result && test_nz $forward_part; then
-        result="$result$forward_part"
-    elif test_nz $forward_part; then
-        # remote extra '/', e.g. "/xxx" => "xxx"
+    if test_nz "${result}" && test_nz "${forward_part}"; then
+        result="${result}${forward_part}"
+    elif test_nz "${forward_part}"; then
         result="${forward_part#*/}"
     fi
 
-    _ret="$result"
+    # same directory?
+    if test_z "${result}" && test_eq "${source}" "${target}"; then
+        result="."
+    fi
+
+    _ret="${result}"
 }
 
 path_sourcekind() {
@@ -596,6 +623,9 @@ is_host() {
 
 # detect host architecture
 os_arch=`uname -m | tr '[A-Z]' '[a-z]'`
+if test_eq "${os_arch}" "i686"; then
+    os_arch="i386"
+fi
 
 # set the default target platform and architecture
 _target_plat_default=${os_host}
@@ -907,7 +937,9 @@ option() {
         fi
         return
     fi
-    _xmake_sh_options="${_xmake_sh_options} ${name}"
+    if ! _map_has "options" "${name}_name"; then
+        _xmake_sh_options="${_xmake_sh_options} ${name}"
+    fi
     _map_set "options" "${name}_name" "${name}"
     _map_set "options" "${name}_description" "${description}"
     _map_set "options" "${name}_default" "${default}"
@@ -1183,7 +1215,9 @@ target() {
     if ! ${_loading_targets}; then
         return
     fi
-    _xmake_sh_targets="${_xmake_sh_targets} ${name}"
+    if ! _map_has "targets" "${name}_name"; then
+        _xmake_sh_targets="${_xmake_sh_targets} ${name}"
+    fi
     _map_set "targets" "${name}_name" "${name}"
     return 0
 }
@@ -1373,6 +1407,43 @@ _get_target_file() {
     _ret="${targetfile}"
 }
 
+# get target librarydeps
+_get_target_librarydeps_impl() {
+    local name="${1}"
+    local librarydeps=""
+    local dep=""
+    _get_target_item "${name}" "deps"; local deps="${_ret}"
+    for dep in ${deps}; do
+        _get_target_item "${dep}" "kind"; local dep_kind="${_ret}"
+        if test_eq "${dep_kind}" "static" || test_eq "${dep_kind}" "shared"; then
+            librarydeps="${librarydeps} ${dep}"
+            _get_target_librarydeps_impl "${dep}"; local dep_librarydeps="${_ret}"
+            if test_nz "${dep_librarydeps}"; then
+                librarydeps="${librarydeps} ${dep_librarydeps}"
+            fi
+        fi
+    done
+    _ret="${librarydeps}"
+}
+
+_get_target_librarydeps() {
+    local name="${1}"
+    _get_target_item "${name}" "librarydeps"; local librarydeps="${_ret}"
+    if test_z "${librarydeps}" && test_nq "${librarydeps}" "__none__"; then
+        _get_target_librarydeps_impl "${name}"; librarydeps="${_ret}"
+        if test_nz "${librarydeps}"; then
+            _dedup_reverse "${librarydeps}"; librarydeps="${_ret}"
+            _set_target_item "${name}" "librarydeps" "${librarydeps}"
+        else
+            _set_target_item "${name}" "librarydeps" "__none__"
+        fi
+    fi
+    if test_eq "${librarydeps}" "__none__"; then
+        librarydeps=""
+    fi
+    _ret="${librarydeps}"
+}
+
 # get sourcefiles in target
 _get_target_sourcefiles() {
     local name="${1}"
@@ -1418,7 +1489,7 @@ _get_target_abstract_flags() {
         _get_target_item "${name}" "${itemname}"; values="${_ret}"
 
         # get values from target deps
-        _get_target_item "${name}" "deps"; local deps="${_ret}"
+        _get_target_librarydeps "${name}"; local deps="${_ret}"
         local dep=""
         for dep in ${deps}; do
             _get_target_item "${dep}" "kind"; local dep_kind="${_ret}"
@@ -1443,6 +1514,9 @@ _get_target_toolchain_flags_for_gcc() {
     local name="${1}"
     local toolkind="${2}"
     local flags=""
+    if is_arch "i386"; then
+        flags="-m32"
+    fi
     _get_target_item "${name}" "kind"; local targetkind="${_ret}"
     if test_eq "${targetkind}" "shared" && test_eq "${toolkind}" "sh"; then
         flags="-shared -fPIC"
@@ -1455,6 +1529,9 @@ _get_target_toolchain_flags_for_clang() {
     local name="${1}"
     local toolkind="${2}"
     local flags="-Qunused-arguments"
+    if is_arch "i386"; then
+        flags="-m32"
+    fi
     _get_target_item "${name}" "kind"; local targetkind="${_ret}"
     if test_eq "${targetkind}" "shared" && test_eq "${toolkind}" "sh"; then
         flags="-shared -fPIC"
@@ -1538,7 +1615,7 @@ _get_target_linker_flags() {
     fi
 
     # get flags from target deps
-    _get_target_item "${name}" "deps"; local deps="${_ret}"
+    _get_target_librarydeps "${name}"; local deps="${_ret}"
     local dep=""
     for dep in ${deps}; do
         _get_target_item "${dep}" "kind"; local dep_kind="${_ret}"
@@ -1664,6 +1741,7 @@ _add_target_installpaths() {
     local key="$1"
     local filepattern="${2}"
     local prefixdir="${3}"
+    local filename=${4}
 
     # get root directory, e.g. "src/foo/(*.h)" -> "src/foo"
     local rootdir=""
@@ -1699,7 +1777,7 @@ _add_target_installpaths() {
     fi
     for file in ${files}; do
         path_relative "${xmake_sh_projectdir}" "${file}"; file="${_ret}"
-        _add_target_item "${_xmake_sh_target_current}" "${key}" "${file}:${rootdir}:${prefixdir}"
+        _add_target_item "${_xmake_sh_target_current}" "${key}" "${file}:${rootdir}:${prefixdir}:${filename}"
     done
 }
 
@@ -2558,6 +2636,18 @@ done
 # detect platform and toolchains
 #
 
+# envs toolchain
+toolchain "envs"
+    set_toolset "as" "$CC" "$CXX" "$AS"
+    set_toolset "cc" "$CC"
+    set_toolset "cxx" "$CC" "$CXX"
+    set_toolset "mm" "$CC" "$CXX"
+    set_toolset "mxx" "$CC" "$CXX"
+    set_toolset "ld" "$CXX" "$CC" "$LD"
+    set_toolset "sh" "$CXX" "$CC" "$LD"
+    set_toolset "ar" "$AR"
+toolchain_end
+
 # clang toolchain
 toolchain "clang"
     set_toolset "as" "clang"
@@ -2580,6 +2670,30 @@ toolchain "gcc"
     set_toolset "ld" "g++" "gcc"
     set_toolset "sh" "g++" "gcc"
     set_toolset "ar" "ar"
+toolchain_end
+
+# mingw toolchain (x86_64)
+toolchain "x86_64_w64_mingw32"
+    set_toolset "as" "x86_64-w64-mingw32-gcc"
+    set_toolset "cc" "x86_64-w64-mingw32-gcc"
+    set_toolset "cxx" "x86_64-w64-mingw32-gcc" "x86_64-w64-mingw32-g++"
+    set_toolset "mm" "x86_64-w64-mingw32-gcc"
+    set_toolset "mxx" "x86_64-w64-mingw32-gcc" "x86_64-w64-mingw32-g++"
+    set_toolset "ld" "x86_64-w64-mingw32-g++" "x86_64-w64-mingw32-gcc"
+    set_toolset "sh" "x86_64-w64-mingw32-g++" "x86_64-w64-mingw32-gcc"
+    set_toolset "ar" "x86_64-w64-mingw32-ar" "ar"
+toolchain_end
+
+# mingw toolchain (i686)
+toolchain "i686_w64_mingw32"
+    set_toolset "as" "i686-w64-mingw32-gcc"
+    set_toolset "cc" "i686-w64-mingw32-gcc"
+    set_toolset "cxx" "i686-w64-mingw32-gcc" "i686-w64-mingw32-g++"
+    set_toolset "mm" "i686-w64-mingw32-gcc"
+    set_toolset "mxx" "i686-w64-mingw32-gcc" "i686-w64-mingw32-g++"
+    set_toolset "ld" "i686-w64-mingw32-g++" "i686-w64-mingw32-gcc"
+    set_toolset "sh" "i686-w64-mingw32-g++" "i686-w64-mingw32-gcc"
+    set_toolset "ar" "i686-w64-mingw32-ar" "ar"
 toolchain_end
 
 # check platform
@@ -2656,11 +2770,10 @@ _toolchain_linkcmd() {
     local flags="${4}"
     _get_toolchain_toolset "${_target_toolchain}" "${toolkind}"; local program="${_ret}"
     path_toolname "${program}"; local toolname="${_ret}"
-    local linkcmd=""
     case "${toolname}" in
         gcc) _toolchain_linkcmd_for_gcc_clang "${toolkind}" "${program}" "${binaryfile}" "${objectfiles}" "${flags}"; linkcmd="${_ret}";;
         gxx) _toolchain_linkcmd_for_gcc_clang "${toolkind}" "${program}" "${binaryfile}" "${objectfiles}" "${flags}"; linkcmd="${_ret}";;
-        clang) _toolchain_linkcmd_for_gcc_clang "${toolkind}" "${program}" "${binaryfile}" "${objectfiles}" "${flags}"; compcmd="${_ret}";;
+        clang) _toolchain_linkcmd_for_gcc_clang "${toolkind}" "${program}" "${binaryfile}" "${objectfiles}" "${flags}"; linkcmd="${_ret}";;
         clangxx) _toolchain_linkcmd_for_gcc_clang "${toolkind}" "${program}" "${binaryfile}" "${objectfiles}" "${flags}"; linkcmd="${_ret}";;
         ar) _toolchain_linkcmd_for_ar "${toolkind}" "${program}" "${binaryfile}" "${objectfiles}" "${flags}"; linkcmd="${_ret}";;
         *) raise "unknown toolname(${toolname})!" ;;
@@ -2820,10 +2933,12 @@ _toolchain_try_toolset() {
             key="${key}_${idx}"
         fi
         _get_toolchain_toolset "${toolchain}" "${key}"; local program="${_ret}"
-        if _toolchain_try_program "${toolchain}" "${kind}" "${program}"; then
-            _set_toolchain_toolset "${toolchain}" "${kind}" "${program}"
-            echo "checking for the ${description} (${kind}) ... ${program}"
-            return 0
+        if test_nz "${program}"; then
+            if _toolchain_try_program "${toolchain}" "${kind}" "${program}"; then
+                _set_toolchain_toolset "${toolchain}" "${kind}" "${program}"
+                echo "checking for the ${description} (${kind}) ... ${program}"
+                return 0
+            fi
         fi
     done
     return 1
@@ -2890,9 +3005,15 @@ _toolchain_detect() {
     local toolchains="${1}"
     if test "x${toolchains}" = "x"; then
         if is_plat "macosx"; then
-            toolchains="clang gcc"
+            toolchains="envs clang gcc"
+        elif is_plat "mingw"; then
+            if is_arch "i386"; then
+                toolchains="i686_w64_mingw32"
+            else
+                toolchains="x86_64_w64_mingw32"
+            fi
         else
-            toolchains="gcc clang"
+            toolchains="envs gcc clang"
         fi
     fi
     for toolchain in ${toolchains}; do
@@ -3405,14 +3526,14 @@ _gmake_add_header() {
     echo "# this is the build file for this project
 # it is autogenerated by the xmake.sh build system.
 # do not edit by hand.
-" > "${xmake_sh_projectdir}/Makefile"
+" > "${xmake_sh_makefile}"
 }
 
 _gmake_add_switches() {
-    echo "ifneq (\$(VERBOSE),1)" >> "${xmake_sh_projectdir}/Makefile"
-    echo "V=@" >> "${xmake_sh_projectdir}/Makefile"
-    echo "endif" >> "${xmake_sh_projectdir}/Makefile"
-    echo "" >> "${xmake_sh_projectdir}/Makefile"
+    echo "ifneq (\$(VERBOSE),1)" >> "${xmake_sh_makefile}"
+    echo "V=@" >> "${xmake_sh_makefile}"
+    echo "endif" >> "${xmake_sh_makefile}"
+    echo "" >> "${xmake_sh_makefile}"
 }
 
 _gmake_add_flags() {
@@ -3422,9 +3543,9 @@ _gmake_add_flags() {
             _get_target_flags "${target}" "${kind}"; local flags="${_ret}"
             _get_flagname "${kind}"; local flagname="${_ret}"
             local key="${target}_${flagname}"
-            echo "${key}=${flags}" >> "${xmake_sh_projectdir}/Makefile"
+            echo "${key}=${flags}" >> "${xmake_sh_makefile}"
         done
-        echo "" >> "${xmake_sh_projectdir}/Makefile"
+        echo "" >> "${xmake_sh_makefile}"
     done
 }
 
@@ -3433,9 +3554,9 @@ _gmake_add_toolchains() {
     for kind in ${kinds}; do
         _get_toolchain_toolset "${_target_toolchain}" "${kind}"; local program="${_ret}"
         local key="${kind}"
-        echo "${key}=${program}" >> "${xmake_sh_projectdir}/Makefile"
+        echo "${key}=${program}" >> "${xmake_sh_makefile}"
     done
-    echo "" >> "${xmake_sh_projectdir}/Makefile"
+    echo "" >> "${xmake_sh_makefile}"
 }
 
 _gmake_add_build_object_for_gcc_clang() {
@@ -3444,8 +3565,8 @@ _gmake_add_build_object_for_gcc_clang() {
     local objectfile="${3}"
     local flagname="${4}"
     path_directory "${objectfile}"; local objectdir="${_ret}"
-    print "\t@mkdir -p ${objectdir}" >> "${xmake_sh_projectdir}/Makefile"
-    print "\t\$(V)\$(${kind}) -c \$(${flagname}) -o ${objectfile} ${sourcefile}" >> "${xmake_sh_projectdir}/Makefile"
+    print "\t@mkdir -p ${objectdir}" >> "${xmake_sh_makefile}"
+    print "\t\$(V)\$(${kind}) -c \$(${flagname}) -o ${objectfile} ${sourcefile}" >> "${xmake_sh_makefile}"
 }
 
 _gmake_add_build_object() {
@@ -3457,8 +3578,8 @@ _gmake_add_build_object() {
     path_toolname "${program}"; local toolname="${_ret}"
     _get_flagname "${sourcekind}"; local flagname="${_ret}"
     flagname="${target}_${flagname}"
-    echo "${objectfile}: ${sourcefile}" >> "${xmake_sh_projectdir}/Makefile"
-    print "\t@echo compiling.${_target_mode} ${sourcefile}" >> "${xmake_sh_projectdir}/Makefile"
+    echo "${objectfile}: ${sourcefile}" >> "${xmake_sh_makefile}"
+    print "\t@echo compiling.${_target_mode} ${sourcefile}" >> "${xmake_sh_makefile}"
     case "${toolname}" in
         gcc) _gmake_add_build_object_for_gcc_clang "${sourcekind}" "${sourcefile}" "${objectfile}" "${flagname}";;
         gxx) _gmake_add_build_object_for_gcc_clang "${sourcekind}" "${sourcefile}" "${objectfile}" "${flagname}";;
@@ -3466,7 +3587,7 @@ _gmake_add_build_object() {
         clangxx) _gmake_add_build_object_for_gcc_clang "${sourcekind}" "${sourcefile}" "${objectfile}" "${flagname}";;
         *) raise "unknown toolname(${toolname})!" ;;
     esac
-    echo "" >> "${xmake_sh_projectdir}/Makefile"
+    echo "" >> "${xmake_sh_makefile}"
 }
 
 _gmake_add_build_objects() {
@@ -3484,8 +3605,8 @@ _gmake_add_build_target_for_gcc_clang() {
     local objectfiles="${3}"
     local flagname="${4}"
     path_directory "${targetfile}"; local targetdir="${_ret}"
-    print "\t@mkdir -p ${targetdir}" >> "${xmake_sh_projectdir}/Makefile"
-    print "\t\$(V)\$(${kind}) -o ${targetfile} ${objectfiles} \$(${flagname})" >> "${xmake_sh_projectdir}/Makefile"
+    print "\t@mkdir -p ${targetdir}" >> "${xmake_sh_makefile}"
+    print "\t\$(V)\$(${kind}) -o ${targetfile} ${objectfiles} \$(${flagname})" >> "${xmake_sh_makefile}"
 }
 
 _gmake_add_build_target_for_ar() {
@@ -3494,8 +3615,8 @@ _gmake_add_build_target_for_ar() {
     local objectfiles="${3}"
     local flagname="${4}"
     path_directory "${targetfile}"; local targetdir="${_ret}"
-    print "\t@mkdir -p ${targetdir}" >> "${xmake_sh_projectdir}/Makefile"
-    print "\t\$(V)\$(${kind}) \$(${flagname}) ${flags} ${targetfile} ${objectfiles}" >> "${xmake_sh_projectdir}/Makefile"
+    print "\t@mkdir -p ${targetdir}" >> "${xmake_sh_makefile}"
+    print "\t\$(V)\$(${kind}) \$(${flagname}) ${flags} ${targetfile} ${objectfiles}" >> "${xmake_sh_makefile}"
 }
 
 _gmake_add_build_target() {
@@ -3521,10 +3642,22 @@ _gmake_add_build_target() {
     _get_flagname "${toolkind}"; local flagname="${_ret}"
     flagname="${target}_${flagname}"
 
+    # get depfiles
+    local dep=""
+    local depfiles=""
+    for dep in ${deps}; do
+        _get_target_file "${dep}"; local depfile="${_ret}"
+        if test_nz "${depfiles}"; then
+            depfiles="${depfiles} ${depfile}"
+        else
+            depfiles="${depfile}"
+        fi
+    done
+
     # link target
-    echo "${target}: ${targetfile}" >> "${xmake_sh_projectdir}/Makefile"
-    echo "${targetfile}: ${deps}${objectfiles}" >> "${xmake_sh_projectdir}/Makefile"
-    print "\t@echo linking.${_target_mode} ${targetfile}" >> "${xmake_sh_projectdir}/Makefile"
+    echo "${target}: ${targetfile}" >> "${xmake_sh_makefile}"
+    echo "${targetfile}: ${depfiles}${objectfiles}" >> "${xmake_sh_makefile}"
+    print "\t@echo linking.${_target_mode} ${targetfile}" >> "${xmake_sh_makefile}"
     case "${toolname}" in
         gcc) _gmake_add_build_target_for_gcc_clang "${toolkind}" "${targetfile}" "${objectfiles}" "${flagname}";;
         gxx) _gmake_add_build_target_for_gcc_clang "${toolkind}" "${targetfile}" "${objectfiles}" "${flagname}";;
@@ -3533,23 +3666,24 @@ _gmake_add_build_target() {
         ar) _gmake_add_build_target_for_ar "${toolkind}" "${targetfile}" "${objectfiles}" "${flagname}";;
         *) raise "unknown toolname(${toolname})!" ;;
     esac
-    echo "" >> "${xmake_sh_projectdir}/Makefile"
+    echo "" >> "${xmake_sh_makefile}"
 
     # build objects
     _gmake_add_build_objects "${target}"
 }
 
 _gmake_add_build_targets() {
+    local target=""
     local defaults=""
     for target in ${_xmake_sh_targets}; do
         if _is_target_default "${target}"; then
             defaults="${defaults} ${target}"
         fi
     done
-    echo "default:${defaults}" >> "${xmake_sh_projectdir}/Makefile"
-    echo "all:${_xmake_sh_targets}" >> "${xmake_sh_projectdir}/Makefile"
-    echo ".PHONY: default all" >> "${xmake_sh_projectdir}/Makefile"
-    echo "" >> "${xmake_sh_projectdir}/Makefile"
+    echo "default:${defaults}" >> "${xmake_sh_makefile}"
+    echo "all:${_xmake_sh_targets}" >> "${xmake_sh_makefile}"
+    echo ".PHONY: default all" >> "${xmake_sh_makefile}"
+    echo "" >> "${xmake_sh_makefile}"
     for target in ${_xmake_sh_targets}; do
         _gmake_add_build_target "${target}"
     done
@@ -3562,10 +3696,11 @@ _gmake_add_build() {
 _gmake_add_run_target() {
     local target=${1}
     _get_target_file "${target}"; local targetfile="${_ret}"
-    print "\t@${targetfile}" >> "${xmake_sh_projectdir}/Makefile"
+    print "\t@${targetfile}" >> "${xmake_sh_makefile}"
 }
 
 _gmake_add_run_targets() {
+    local target=""
     local targets=""
     for target in ${_xmake_sh_targets}; do
         _get_target_item "${target}" "kind"; local kind="${_ret}"
@@ -3575,11 +3710,11 @@ _gmake_add_run_targets() {
             fi
         fi
     done
-    echo "run:${targets}" >> "${xmake_sh_projectdir}/Makefile"
+    echo "run:${targets}" >> "${xmake_sh_makefile}"
     for target in ${targets}; do
         _gmake_add_run_target "${target}"
     done
-    echo "" >> "${xmake_sh_projectdir}/Makefile"
+    echo "" >> "${xmake_sh_makefile}"
 }
 
 _gmake_add_run() {
@@ -3588,26 +3723,28 @@ _gmake_add_run() {
 
 _gmake_add_clean_target() {
     local target=${1}
+    local objectfile=""
     _get_target_file "${target}"; local targetfile="${_ret}"
     _get_target_objectfiles "${target}"; local objectfiles="${_ret}"
-    print "\t@rm ${targetfile}" >> "${xmake_sh_projectdir}/Makefile"
+    print "\t@rm ${targetfile}" >> "${xmake_sh_makefile}"
     for objectfile in ${objectfiles}; do
-        print "\t@rm ${objectfile}" >> "${xmake_sh_projectdir}/Makefile"
+        print "\t@rm ${objectfile}" >> "${xmake_sh_makefile}"
     done
 }
 
 _gmake_add_clean_targets() {
+    local target=""
     local targets=""
     for target in ${_xmake_sh_targets}; do
         if _is_target_default "${target}"; then
             targets="${targets} ${target}"
         fi
     done
-    echo "clean:${targets}" >> "${xmake_sh_projectdir}/Makefile"
+    echo "clean:${targets}" >> "${xmake_sh_makefile}"
     for target in ${targets}; do
         _gmake_add_clean_target "${target}"
     done
-    echo "" >> "${xmake_sh_projectdir}/Makefile"
+    echo "" >> "${xmake_sh_makefile}"
 }
 
 _gmake_add_clean() {
@@ -3626,23 +3763,27 @@ _gmake_add_install_target() {
     # install target file
     _get_target_item "${target}" "kind"; local targetkind="${_ret}"
     if test_eq "${targetkind}" "binary"; then
-        print "\t@mkdir -p ${installdir}/${_install_bindir_default}" >> "${xmake_sh_projectdir}/Makefile"
-        print "\t@cp -p ${targetfile} ${installdir}/${_install_bindir_default}/${filename}" >> "${xmake_sh_projectdir}/Makefile"
+        print "\t@mkdir -p ${installdir}/${_install_bindir_default}" >> "${xmake_sh_makefile}"
+        print "\t@cp -p ${targetfile} ${installdir}/${_install_bindir_default}/${filename}" >> "${xmake_sh_makefile}"
     elif test_eq "${targetkind}" "static" || test_eq "${targetkind}" "shared"; then
-        print "\t@mkdir -p ${installdir}/${_install_libdir_default}" >> "${xmake_sh_projectdir}/Makefile"
-        print "\t@cp -p ${targetfile} ${installdir}/${_install_libdir_default}/${filename}" >> "${xmake_sh_projectdir}/Makefile"
+        print "\t@mkdir -p ${installdir}/${_install_libdir_default}" >> "${xmake_sh_makefile}"
+        print "\t@cp -p ${targetfile} ${installdir}/${_install_libdir_default}/${filename}" >> "${xmake_sh_makefile}"
     fi
 
     # install header files
     _get_target_item "${target}" "headerfiles"; local headerfiles="${_ret}"
     if test_nz "${headerfiles}"; then
+        local srcheaderfile=""
         local includedir="${installdir}/${_install_includedir_default}"
         for srcheaderfile in ${headerfiles}; do
             string_split "${srcheaderfile}" ":"
             local srcheaderfile="${_ret}"
             local rootdir="${_ret2}"
             local prefixdir="${_ret3}"
-            path_filename "${srcheaderfile}"; local filename="${_ret}"
+            local filename="${_ret4}"
+            if test_z "${filename}"; then
+                path_filename "${srcheaderfile}"; filename="${_ret}"
+            fi
             local dstheaderdir="${includedir}"
             if test_nz "${prefixdir}"; then
                 dstheaderdir="${dstheaderdir}/${prefixdir}"
@@ -3653,20 +3794,24 @@ _gmake_add_install_target() {
                 dstheaderfile="${dstheaderdir}/${subfile}"
             fi
             path_directory "${dstheaderfile}"; dstheaderdir="${_ret}"
-            print "\t@mkdir -p ${dstheaderdir}" >> "${xmake_sh_projectdir}/Makefile"
-            print "\t@cp -p ${srcheaderfile} ${dstheaderfile}" >> "${xmake_sh_projectdir}/Makefile"
+            print "\t@mkdir -p ${dstheaderdir}" >> "${xmake_sh_makefile}"
+            print "\t@cp -p ${srcheaderfile} ${dstheaderfile}" >> "${xmake_sh_makefile}"
         done
     fi
 
     # install user files
     _get_target_item "${target}" "installfiles"; local installfiles="${_ret}"
     if test_nz "${installfiles}"; then
+        local srcinstallfile=""
         for srcinstallfile in ${installfiles}; do
             string_split "${srcinstallfile}" ":"
             local srcinstallfile="${_ret}"
             local rootdir="${_ret2}"
             local prefixdir="${_ret3}"
-            path_filename "${srcinstallfile}"; local filename="${_ret}"
+            local filename="${_ret4}"
+            if test_z "${filename}"; then
+                path_filename "${srcinstallfile}"; filename="${_ret}"
+            fi
             local dstinstalldir="${installdir}"
             if test_nz "${prefixdir}"; then
                 dstinstalldir="${dstinstalldir}/${prefixdir}"
@@ -3677,24 +3822,25 @@ _gmake_add_install_target() {
                 dstinstallfile="${dstinstalldir}/${subfile}"
             fi
             path_directory "${dstinstallfile}"; dstinstalldir="${_ret}"
-            print "\t@mkdir -p ${dstinstalldir}" >> "${xmake_sh_projectdir}/Makefile"
-            print "\t@cp -p ${srcinstallfile} ${dstinstallfile}" >> "${xmake_sh_projectdir}/Makefile"
+            print "\t@mkdir -p ${dstinstalldir}" >> "${xmake_sh_makefile}"
+            print "\t@cp -p ${srcinstallfile} ${dstinstallfile}" >> "${xmake_sh_makefile}"
         done
     fi
 }
 
 _gmake_add_install_targets() {
+    local target=""
     local targets=""
     for target in ${_xmake_sh_targets}; do
         if _is_target_default "${target}"; then
             targets="${targets} ${target}"
         fi
     done
-    echo "install:${targets}" >> "${xmake_sh_projectdir}/Makefile"
+    echo "install:${targets}" >> "${xmake_sh_makefile}"
     for target in ${targets}; do
         _gmake_add_install_target "${target}"
     done
-    echo "" >> "${xmake_sh_projectdir}/Makefile"
+    echo "" >> "${xmake_sh_makefile}"
 }
 
 _gmake_add_install() {

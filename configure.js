@@ -19,7 +19,7 @@
 // @author      ruki
 //
 
-import fs from 'fs';
+import fs from 'fs-extra';
 import path, { dirname } from 'path';
 import { execaSync } from "execa"
 import fastGlob from 'fast-glob'
@@ -32,10 +32,11 @@ const __dirname = url.fileURLToPath(new URL('.', import.meta.url));
 
 const xmake_sh_projectdir = path.resolve(__dirname);
 const xmake_sh_buildir = 'build';
-const xmake_sh_version = '1.0.2';
+const xmake_sh_version = '1.0.3';
 const xmake_sh_verbose = false;
 const xmake_sh_diagnosis = false;
 const xmake_sh_copyright = 'Copyright (C) 2022-present Ruki Wang, tboox.org, xmake.io.';
+const xmake_sh_makefile = path.join(xmake_sh_projectdir, "makefile")
 
 let _loading_toolchains = true
 let _loading_options = true
@@ -267,6 +268,9 @@ function path_basename(str) {
 }
 
 function path_directory(str) {
+    if (test_z(path))
+        raise("invalid empty path in path_directory().")
+
     return path.dirname(str);
 }
 
@@ -485,7 +489,15 @@ function is_host(...hosts) {
 }
 
 // detect host architecture
-const os_arch = os.arch().toLowerCase();
+let os_arch = os.arch().toLowerCase();
+
+if (test_eq(os_arch, "x64")) {
+    os_arch = "x86_64" // keep same as 'uname -m'
+}
+
+if (test_eq(os_arch, "i686")) {
+    os_arch = "i386"
+}
 
 // set the default target platform and architecture
 const _target_plat_default = os_host;
@@ -862,7 +874,8 @@ const option = (name, description, _default) => {
             _xmake_sh_option_current = ""
         return
     }
-    _xmake_sh_options = `${_xmake_sh_options} ${name}`;
+    if (!_map_has("options", `${name}_name`))
+        _xmake_sh_options = `${_xmake_sh_options} ${name}`;
     _map_set("options", `${name}_name`, name);
     _map_set("options", `${name}_description`, description);
     _map_set("options", `${name}_default`, _default);
@@ -870,7 +883,7 @@ const option = (name, description, _default) => {
     // we end option if it's just one line
     if (test_nz(description))
         _xmake_sh_option_current = ""
-    return 0;
+    return true;
 }
 
 const option_end = () => {
@@ -1100,7 +1113,8 @@ function target(name) {
     if (!_loading_targets) {
         return;
     }
-    _xmake_sh_targets += ` ${name}`;
+    if (!_map_has("targets", `${name}_name`))
+        _xmake_sh_targets = `${_xmake_sh_targets} ${name}`;
     _map_set("targets", `${name}_name`, name);
     return 0;
 }
@@ -1265,6 +1279,40 @@ function _get_target_file(name) {
     return targetfile;
 }
 
+function _get_target_librarydeps_impl(name) {
+    let librarydeps = "";
+    let deps = _get_target_item(name, "deps");
+    for (const dep of string_to_array(deps)) {
+        let dep_kind = _get_target_item(dep, "kind");
+        if (test_eq(dep_kind, "static") || test_eq(dep_kind, "shared")) {
+            librarydeps += ` ${dep}`;
+            let dep_librarydeps = _get_target_librarydeps_impl(dep);
+            if (test_nz(dep_librarydeps)) {
+                librarydeps += ` ${dep_librarydeps}`;
+            }
+        }
+    }
+    return librarydeps;
+}
+
+function _get_target_librarydeps(name) {
+    let librarydeps = _get_target_item(name, "librarydeps");
+    if (test_z(librarydeps) && test_nq(librarydeps, "__none__")) {
+        librarydeps = _get_target_librarydeps_impl(name);
+        if (test_nz(librarydeps)) {
+            librarydeps = _dedup_reverse(librarydeps);
+            _set_target_item(name, "librarydeps", librarydeps);
+        } else {
+            _set_target_item(name, "librarydeps", "__none__");
+        }
+    }
+    if (test_eq(librarydeps, "__none__")) {
+        librarydeps = "";
+    }
+    return librarydeps;
+}
+
+
 // 获取目标中的源文件
 function _get_target_sourcefiles(name) {
     const sourcefiles = _get_target_item(name, "files");
@@ -1294,7 +1342,7 @@ const _get_target_objectfiles = (name) => {
 function _get_target_abstract_flags(name, toolkind, toolname, itemname, values) {
     if (test_z(values)) {
         values = _get_target_item(name, itemname) ?? [];
-        const deps = _get_target_item(name, "deps") ?? "";
+        const deps = _get_target_librarydeps(name) ?? "";
         values = string_to_array(deps).reduce((values, dep) => {
             const dep_kind = _get_target_item(dep, "kind");
             if (test_eq(dep_kind, "static") || test_eq(dep_kind, "shared")) {
@@ -1319,6 +1367,10 @@ function _get_target_toolchain_flags_for_ar() {
 // get toolchain flags for gcc in target
 function _get_target_toolchain_flags_for_gcc(name, toolkind) {
     let flags = "";
+
+    if (is_arch("i386")) {
+        flags = "-m32"
+    }
     const targetkind = _get_target_item(name, "kind");
     if (test_eq(targetkind, "shared") && test_eq(toolkind, "sh")) {
         flags = "-shared -fPIC";
@@ -1328,6 +1380,10 @@ function _get_target_toolchain_flags_for_gcc(name, toolkind) {
 // get toolchain flags for clang in target
 function _get_target_toolchain_flags_for_clang(name, toolkind) {
     let flags = "-Qunused-arguments";
+
+    if (is_arch("i386")) {
+        flags = "-m32"
+    }
     const targetkind = _get_target_item(name, "kind");
     if (test_eq(targetkind, "shared") && test_eq(toolkind, "sh")) {
         flags = "-shared -fPIC";
@@ -1413,7 +1469,7 @@ function _get_target_linker_flags(name, toolkind) {
     }
 
     // get flags from target deps
-    const deps = _get_target_item(name, "deps") ?? "";
+    const deps = _get_target_librarydeps(name) ?? "";
     string_to_array(deps).forEach(dep => {
         const dep_kind = _get_target_item(dep, "kind");
         if (test_eq(dep_kind, "static") || test_eq(dep_kind, "shared")) {
@@ -1527,7 +1583,7 @@ const _add_target_filepaths = (key, ...files) => {
     }
 };
 
-const _add_target_installpaths = (key, filepattern, prefixdir) => {
+const _add_target_installpaths = (key, filepattern, prefixdir, filename) => {
     // get root directory, e.g. "src/foo/(*.h)" -> "src/foo"
     let rootdir = "";
     if (string_contains(filepattern, "(")) {
@@ -1562,7 +1618,7 @@ const _add_target_installpaths = (key, filepattern, prefixdir) => {
     }
     for (let file of files) {
         file = path_relative(xmake_sh_projectdir, file);
-        _add_target_item(_xmake_sh_target_current, key, `${file}:${rootdir}:${prefixdir}`);
+        _add_target_item(_xmake_sh_target_current, key, `${file}:${rootdir}:${prefixdir}:${filename ?? ""}`);
     }
 };
 
@@ -2367,6 +2423,26 @@ while (args.length !== 0) {
 // detect platform and toolchains
 //
 
+// envs toolchain
+{
+    const CC = process.env.CC ?? ""
+    const CXX = process.env.CXX ?? ""
+    const AS = process.env.AS ?? ""
+    const LD = process.env.LD ?? ""
+    const AR = process.env.AR ?? ""
+
+    toolchain("envs")
+    set_toolset("as", `${CC}`, `${CXX}`, `${AS}`)
+    set_toolset("cc", `${CC}`)
+    set_toolset("cxx", `${CC}`, `${CXX}`)
+    set_toolset("mm", `${CC}`, `${CXX}`)
+    set_toolset("mxx", `${CC}`, `${CXX}`)
+    set_toolset("ld", `${CXX}`, `${CC}`, `${LD}`)
+    set_toolset("sh", `${CXX}`, `${CC}`, `${LD}`)
+    set_toolset("ar", `${AR}`)
+    toolchain_end()
+}
+
 // clang toolchain
 toolchain("clang");
 set_toolset("as", "clang");
@@ -2390,6 +2466,30 @@ set_toolset("ld", "g++", "gcc");
 set_toolset("sh", "g++", "gcc");
 set_toolset("ar", "ar");
 toolchain_end();
+
+// mingw toolchain (x86_64)
+toolchain("x86_64_w64_mingw32")
+set_toolset("as", "x86_64-w64-mingw32-gcc")
+set_toolset("cc", "x86_64-w64-mingw32-gcc")
+set_toolset("cxx", "x86_64-w64-mingw32-gcc", "x86_64-w64-mingw32-g++")
+set_toolset("mm", "x86_64-w64-mingw32-gcc")
+set_toolset("mxx", "x86_64-w64-mingw32-gcc", "x86_64-w64-mingw32-g++")
+set_toolset("ld", "x86_64-w64-mingw32-g++", "x86_64-w64-mingw32-gcc")
+set_toolset("sh", "x86_64-w64-mingw32-g++", "x86_64-w64-mingw32-gcc")
+set_toolset("ar", "x86_64-w64-mingw32-ar", "ar")
+toolchain_end()
+
+// mingw toolchain (i686)
+toolchain("i686_w64_mingw32")
+set_toolset("as", "i686-w64-mingw32-gcc")
+set_toolset("cc", "i686-w64-mingw32-gcc")
+set_toolset("cxx", "i686-w64-mingw32-gcc", "i686-w64-mingw32-g++")
+set_toolset("mm", "i686-w64-mingw32-gcc")
+set_toolset("mxx", "i686-w64-mingw32-gcc", "i686-w64-mingw32-g++")
+set_toolset("ld", "i686-w64-mingw32-g++", "i686-w64-mingw32-gcc")
+set_toolset("sh", "i686-w64-mingw32-g++", "i686-w64-mingw32-gcc")
+set_toolset("ar", "i686-w64-mingw32-ar", "ar")
+toolchain_end()
 
 const _check_platform = () => {
     _target_plat = _target_plat || _target_plat_default;
@@ -2597,16 +2697,20 @@ const _toolchain_try_program = (toolchain, kind, program) => {
 const _toolchain_try_toolset = (toolchain, kind, description) => {
     const indices = [0, 1, 2, 3, 4, 5]
     for (let idx of indices) {
-        const key = kind
+        let key = kind
         if (idx !== 0)
             key = `${key}_${idx}`
 
         let program = _get_toolchain_toolset(toolchain, key);
-        if (_toolchain_try_program(toolchain, kind, program)) {
-            _set_toolchain_toolset(toolchain, kind, program);
-            console.log(`checking for the ${description} (${kind}) ... ${program}`);
-            return true;
+
+        if (test_nz(program)) {
+            if (_toolchain_try_program(toolchain, kind, program)) {
+                _set_toolchain_toolset(toolchain, kind, program);
+                console.log(`checking for the ${description} (${kind}) ... ${program}`);
+                return true;
+            }
         }
+
     }
     return false;
 }
@@ -2665,11 +2769,16 @@ function _toolchain_detect(toolchains) {
     // detect build backend
     _toolchain_detect_backend();
     // detect toolchains
-    if (typeof toolchains === "undefined" || toolchains === '') {
+    if (test_z(toolchains)) {
         if (is_plat('macosx')) {
-            toolchains = 'clang gcc';
+            toolchains = 'envs clang gcc';
+        } else if (is_plat("mingw")) {
+            if (is_arch("i386"))
+                toolchains = "i686_w64_mingw32"
+            else
+                toolchains = "x86_64_w64_mingw32"
         } else {
-            toolchains = 'gcc clang';
+            toolchains = 'envs gcc clang';
         }
     }
 
@@ -2989,7 +3098,7 @@ function _generate_configfile(target, configfile_in) {
         configdir = path_directory(configfile_in);
     }
     if (!fs.existsSync(configdir)) {
-        fs.mkdirSync(configdir);
+        fs.mkdirpSync(configdir);
     }
     const filename = path_basename(configfile_in);
     const configfile = `${configdir}/${filename}`;
@@ -3109,7 +3218,7 @@ function _gmake_begin() {
 }
 
 function _gmake_add_header() {
-    fs.writeFileSync(`${xmake_sh_projectdir}/Makefile`, `# this is the build file for this project
+    fs.writeFileSync(xmake_sh_makefile, `# this is the build file for this project
 # it is autogenerated by the xmake.js build system.
 # do not edit by hand.
 
@@ -3117,7 +3226,7 @@ function _gmake_add_header() {
 }
 
 function _gmake_add_switches() {
-    fs.appendFileSync(`${xmake_sh_projectdir}/Makefile`, `ifneq (\$(VERBOSE),1)
+    fs.appendFileSync(xmake_sh_makefile, `ifneq (\$(VERBOSE),1)
 V=@
 endif
 
@@ -3130,9 +3239,9 @@ function _gmake_add_flags() {
         for (const kind of string_to_array(kinds)) {
             const flags = _get_target_flags(target, kind);
             const flagname = _get_flagname(kind);
-            fs.appendFileSync(`${xmake_sh_projectdir}/Makefile`, `${target}_${flagname}=${flags}\n`, { encoding: "utf8" });
+            fs.appendFileSync(xmake_sh_makefile, `${target}_${flagname}=${flags}\n`, { encoding: "utf8" });
         }
-        fs.appendFileSync(`${xmake_sh_projectdir}/Makefile`, "\n", { encoding: "utf8" });
+        fs.appendFileSync(xmake_sh_makefile, "\n", { encoding: "utf8" });
     }
 }
 
@@ -3140,15 +3249,15 @@ function _gmake_add_toolchains() {
     const kinds = _get_targets_toolkinds()
     for (const kind of string_to_array(kinds)) {
         const program = _get_toolchain_toolset(_target_toolchain, kind);
-        fs.appendFileSync(`${xmake_sh_projectdir}/Makefile`, `${kind}=${program}\n`, { encoding: "utf8" });
+        fs.appendFileSync(xmake_sh_makefile, `${kind}=${program}\n`, { encoding: "utf8" });
     }
-    fs.appendFileSync(`${xmake_sh_projectdir}/Makefile`, "\n", { encoding: "utf8" });
+    fs.appendFileSync(xmake_sh_makefile, "\n", { encoding: "utf8" });
 }
 
 const _gmake_add_build_object_for_gcc_clang = (kind, sourcefile, objectfile, flagname) => {
     const objectdir = path_directory(objectfile);
-    fs.appendFileSync(`${xmake_sh_projectdir}/Makefile`, `\t@mkdir -p ${objectdir}\n`);
-    fs.appendFileSync(`${xmake_sh_projectdir}/Makefile`, `\t$(V)$(${kind}) -c $(${flagname}) -o ${objectfile} ${sourcefile}\n`);
+    fs.appendFileSync(xmake_sh_makefile, `\t@mkdir -p ${objectdir}\n`);
+    fs.appendFileSync(xmake_sh_makefile, `\t$(V)$(${kind}) -c $(${flagname}) -o ${objectfile} ${sourcefile}\n`);
 }
 
 const _gmake_add_build_object = (target, sourcefile, objectfile) => {
@@ -3157,8 +3266,8 @@ const _gmake_add_build_object = (target, sourcefile, objectfile) => {
     const toolname = path_toolname(program);
     let flagname = _get_flagname(sourcekind);
     flagname = `${target}_${flagname}`;
-    fs.appendFileSync(`${xmake_sh_projectdir}/Makefile`, `${objectfile}: ${sourcefile}\n`);
-    fs.appendFileSync(`${xmake_sh_projectdir}/Makefile`, `\t@echo compiling.${_target_mode} ${sourcefile}\n`);
+    fs.appendFileSync(xmake_sh_makefile, `${objectfile}: ${sourcefile}\n`);
+    fs.appendFileSync(xmake_sh_makefile, `\t@echo compiling.${_target_mode} ${sourcefile}\n`);
     switch (toolname) {
         case "gcc":
             _gmake_add_build_object_for_gcc_clang(sourcekind, sourcefile, objectfile, flagname);
@@ -3175,7 +3284,7 @@ const _gmake_add_build_object = (target, sourcefile, objectfile) => {
         default:
             raise("unknown toolname(${toolname})!");
     }
-    fs.appendFileSync(`${xmake_sh_projectdir}/Makefile`, "\n");
+    fs.appendFileSync(xmake_sh_makefile, "\n");
 }
 
 const _gmake_add_build_objects = (target) => {
@@ -3188,14 +3297,14 @@ const _gmake_add_build_objects = (target) => {
 
 const _gmake_add_build_target_for_gcc_clang = (kind, targetfile, objectfiles, flagname) => {
     const targetdir = path_directory(targetfile);
-    fs.appendFileSync(`${xmake_sh_projectdir}/Makefile`, `\t@mkdir -p ${targetdir}\n`);
-    fs.appendFileSync(`${xmake_sh_projectdir}/Makefile`, `\t$(V)$(${kind}) -o ${targetfile} ${objectfiles} $(${flagname})\n`);
+    fs.appendFileSync(xmake_sh_makefile, `\t@mkdir -p ${targetdir}\n`);
+    fs.appendFileSync(xmake_sh_makefile, `\t$(V)$(${kind}) -o ${targetfile} ${objectfiles} $(${flagname})\n`);
 }
 
 const _gmake_add_build_target_for_ar = (kind, targetfile, objectfiles, flagname) => {
     const targetdir = path_directory(targetfile);
-    fs.appendFileSync(`${xmake_sh_projectdir}/Makefile`, `\t@mkdir -p ${targetdir}\n`);
-    fs.appendFileSync(`${xmake_sh_projectdir}/Makefile`, `\t$(V)$(${kind}) $(${flagname}) ${targetfile} ${objectfiles}\n`);
+    fs.appendFileSync(xmake_sh_makefile, `\t@mkdir -p ${targetdir}\n`);
+    fs.appendFileSync(xmake_sh_makefile, `\t$(V)$(${kind}) $(${flagname}) ${targetfile} ${objectfiles}\n`);
 }
 
 function _gmake_add_build_target(target) {
@@ -3228,10 +3337,15 @@ function _gmake_add_build_target(target) {
     let flagname = _get_flagname(toolkind);
     flagname = target + "_" + flagname
 
+    const depfiles = string_to_array(deps)
+        .map(dep => _get_target_file(dep))
+        .filter(depfile => test_nz(depfile))
+        .join(" ")
+
     // link target
-    fs.appendFileSync(`${xmake_sh_projectdir}/Makefile`, `${target}: ${targetfile}\n`);
-    fs.appendFileSync(`${xmake_sh_projectdir}/Makefile`, `${targetfile}: ${deps} ${objectfiles}\n`);
-    fs.appendFileSync(`${xmake_sh_projectdir}/Makefile`, `\t@echo linking.${_target_mode} ${targetfile}\n`);
+    fs.appendFileSync(xmake_sh_makefile, `${target}: ${targetfile}\n`);
+    fs.appendFileSync(xmake_sh_makefile, `${targetfile}: ${depfiles} ${objectfiles}\n`);
+    fs.appendFileSync(xmake_sh_makefile, `\t@echo linking.${_target_mode} ${targetfile}\n`);
     switch (toolname) {
         case "gcc":
             _gmake_add_build_target_for_gcc_clang(toolkind, targetfile, objectfiles, flagname);
@@ -3252,7 +3366,7 @@ function _gmake_add_build_target(target) {
             raise("unknown toolname(" + toolname + ")!");
             break;
     }
-    fs.appendFileSync(`${xmake_sh_projectdir}/Makefile`, `\n`);
+    fs.appendFileSync(xmake_sh_makefile, `\n`);
 
     // build objects
     _gmake_add_build_objects(target);
@@ -3265,10 +3379,10 @@ const _gmake_add_build_targets = () => {
             defaults += ` ${target}`;
         }
     }
-    fs.appendFileSync(`${xmake_sh_projectdir}/Makefile`, `default:${defaults}\n`);
-    fs.appendFileSync(`${xmake_sh_projectdir}/Makefile`, `all:${_xmake_sh_targets}\n`);
-    fs.appendFileSync(`${xmake_sh_projectdir}/Makefile`, `.PHONY: default all\n`);
-    fs.appendFileSync(`${xmake_sh_projectdir}/Makefile`, "\n");
+    fs.appendFileSync(xmake_sh_makefile, `default:${defaults}\n`);
+    fs.appendFileSync(xmake_sh_makefile, `all:${_xmake_sh_targets}\n`);
+    fs.appendFileSync(xmake_sh_makefile, `.PHONY: default all\n`);
+    fs.appendFileSync(xmake_sh_makefile, "\n");
     _xmake_sh_targets.trim().split(' ').forEach(target => {
         _gmake_add_build_target(target);
     });
@@ -3280,7 +3394,7 @@ const _gmake_add_build = () => {
 
 const _gmake_add_run_target = (target) => {
     const targetfile = _get_target_file(target);
-    fs.appendFileSync(`${xmake_sh_projectdir}/Makefile`, `\t@${targetfile}\n`);
+    fs.appendFileSync(xmake_sh_makefile, `\t@${targetfile}\n`);
 };
 
 const _gmake_add_run_targets = () => {
@@ -3293,13 +3407,13 @@ const _gmake_add_run_targets = () => {
             }
         }
     }
-    fs.appendFileSync(`${xmake_sh_projectdir}/Makefile`, `run: ${targets.join(" ")}\n`);
+    fs.appendFileSync(xmake_sh_makefile, `run: ${targets.join(" ")}\n`);
 
     for (const target of targets) {
         _gmake_add_run_target(target);
     }
 
-    fs.appendFileSync(`${xmake_sh_projectdir}/Makefile`, `\n`);
+    fs.appendFileSync(xmake_sh_makefile, `\n`);
 };
 
 const _gmake_add_run = () => {
@@ -3309,9 +3423,9 @@ const _gmake_add_run = () => {
 const _gmake_add_clean_target = (target) => {
     const targetfile = _get_target_file(target);
     const objectfiles = _get_target_objectfiles(target);
-    fs.appendFileSync(`${xmake_sh_projectdir}/Makefile`, `\t@rm ${targetfile}\n`);
+    fs.appendFileSync(xmake_sh_makefile, `\t@rm ${targetfile}\n`);
     for (const objectfile of objectfiles.split(" ")) {
-        fs.appendFileSync(`${xmake_sh_projectdir}/Makefile`, `\t@rm ${objectfile}\n`);
+        fs.appendFileSync(xmake_sh_makefile, `\t@rm ${objectfile}\n`);
     }
 };
 
@@ -3322,11 +3436,11 @@ function _gmake_add_clean_targets() {
             targets.push(target);
         }
     }
-    fs.appendFileSync(`${xmake_sh_projectdir}/Makefile`, `clean: ${targets.join(" ")}\n`);
+    fs.appendFileSync(xmake_sh_makefile, `clean: ${targets.join(" ")}\n`);
     for (const target of targets) {
         _gmake_add_clean_target(target);
     }
-    fs.appendFileSync(`${xmake_sh_projectdir}/Makefile`, "\n");
+    fs.appendFileSync(xmake_sh_makefile, "\n");
 }
 
 function _gmake_add_clean() {
@@ -3344,11 +3458,11 @@ function _gmake_add_install_target(target) {
     // install target file
     const targetkind = _get_target_item(target, "kind");
     if (test_eq(targetkind, "binary")) {
-        fs.appendFileSync(`${xmake_sh_projectdir}/Makefile`, `\t@mkdir -p ${installdir}/${_install_bindir_default}\n`);
-        fs.appendFileSync(`${xmake_sh_projectdir}/Makefile`, `\t@cp -p ${targetfile} ${installdir}/${_install_bindir_default}/${filename}\n`);
+        fs.appendFileSync(xmake_sh_makefile, `\t@mkdir -p ${installdir}/${_install_bindir_default}\n`);
+        fs.appendFileSync(xmake_sh_makefile, `\t@cp -p ${targetfile} ${installdir}/${_install_bindir_default}/${filename}\n`);
     } else if (test_eq(targetkind, "static") || test_eq(targetkind, "shared")) {
-        fs.appendFileSync(`${xmake_sh_projectdir}/Makefile`, `\t@mkdir -p ${installdir}/${_install_libdir_default}\n`);
-        fs.appendFileSync(`${xmake_sh_projectdir}/Makefile`, `\t@cp -p ${targetfile} ${installdir}/${_install_libdir_default}/${filename}\n`);
+        fs.appendFileSync(xmake_sh_makefile, `\t@mkdir -p ${installdir}/${_install_libdir_default}\n`);
+        fs.appendFileSync(xmake_sh_makefile, `\t@cp -p ${targetfile} ${installdir}/${_install_libdir_default}/${filename}\n`);
     }
 
     // install header files
@@ -3360,7 +3474,9 @@ function _gmake_add_install_target(target) {
             const rootdir = result[1];
             const prefixdir = result[2];
             srcheaderfile = result[0];
-            const filename = path_filename(srcheaderfile);
+            let filename = result[3]
+            if (test_z(filename))
+                filename = path_filename(srcheaderfile);
             let dstheaderdir = includedir;
             if (test_nz(prefixdir)) {
                 dstheaderdir = `${dstheaderdir}/${prefixdir}`;
@@ -3371,8 +3487,8 @@ function _gmake_add_install_target(target) {
                 dstheaderfile = `${dstheaderdir}/${subfile}`;
             }
             dstheaderdir = path_directory(dstheaderfile);
-            fs.appendFileSync(`${xmake_sh_projectdir}/Makefile`, `\t@mkdir -p ${dstheaderdir}\n`);
-            fs.appendFileSync(`${xmake_sh_projectdir}/Makefile`, `\t@cp -p ${srcheaderfile} ${dstheaderfile}\n`);
+            fs.appendFileSync(xmake_sh_makefile, `\t@mkdir -p ${dstheaderdir}\n`);
+            fs.appendFileSync(xmake_sh_makefile, `\t@cp -p ${srcheaderfile} ${dstheaderfile}\n`);
         }
     }
     // 安装用户文件
@@ -3384,7 +3500,10 @@ function _gmake_add_install_target(target) {
             const rootdir = result[1];
             const prefixdir = result[2];
             srcinstallfile = result[0];
-            const filename = path_filename(srcinstallfile);
+            let filename = result[3]
+
+            if (test_z(filename))
+                filename = path_filename(srcinstallfile);
             let dstinstalldir = installdir;
             if (test_nz(prefixdir)) {
                 dstinstalldir = `${dstinstalldir}/${prefixdir}`;
@@ -3395,8 +3514,8 @@ function _gmake_add_install_target(target) {
                 dstinstallfile = `${dstinstalldir}/${subfile}`;
             }
             dstinstalldir = path_directory(dstinstallfile);
-            fs.appendFileSync(`${xmake_sh_projectdir}/Makefile`, `\t@mkdir -p ${dstinstalldir}\n`);
-            fs.appendFileSync(`${xmake_sh_projectdir}/Makefile`, `\t@cp -p ${srcinstallfile} ${dstinstallfile}\n`);
+            fs.appendFileSync(xmake_sh_makefile, `\t@mkdir -p ${dstinstalldir}\n`);
+            fs.appendFileSync(xmake_sh_makefile, `\t@cp -p ${srcinstallfile} ${dstinstallfile}\n`);
         }
     }
 }
@@ -3408,11 +3527,11 @@ const _gmake_add_install_targets = () => {
             targets.push(target);
         }
     }
-    fs.appendFileSync(`${xmake_sh_projectdir}/Makefile`, `install: ${targets.join(" ")}\n`);
+    fs.appendFileSync(xmake_sh_makefile, `install: ${targets.join(" ")}\n`);
     for (const target of targets) {
         _gmake_add_install_target(target);
     }
-    fs.appendFileSync(`${xmake_sh_projectdir}/Makefile`, "\n");
+    fs.appendFileSync(xmake_sh_makefile, "\n");
 };
 
 const _gmake_add_install = () => {
