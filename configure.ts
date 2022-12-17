@@ -20,7 +20,7 @@
 //
 
 import fs from "fs-extra"
-import path, { dirname } from "path"
+import path, { dirname, join as path_join } from "path"
 import { execaSync } from "execa"
 import fastGlob from "fast-glob"
 import os from "os"
@@ -571,10 +571,10 @@ function includes(...paths: string[]) {
         } else {
             const xmake_sh_scriptdir_cur = xmake_sh_scriptdir
             if (xmake_sh_scriptdir !== "") {
-                xmake_sh_scriptdir = `${xmake_sh_scriptdir_cur}/${path}`
-                eval(fs.readFileSync(`${xmake_sh_scriptdir}/xmake.js`).toString())
+                xmake_sh_scriptdir = path_join(xmake_sh_scriptdir_cur, path)
+                eval(fs.readFileSync(path_join(xmake_sh_scriptdir, "xmake.js")).toString())
             } else {
-                eval(fs.readFileSync(`${xmake_sh_projectdir}/${path}/xmake.js`).toString())
+                eval(fs.readFileSync(path_join(xmake_sh_projectdir, path, "xmake.js")).toString())
             }
             xmake_sh_scriptdir = xmake_sh_scriptdir_cur
         }
@@ -1187,7 +1187,7 @@ const _get_target_filename = (name: string) => {
 const _get_targetdir = (name: string) => {
     let targetdir = _get_target_item(name, "targetdir")
     if (test_z(targetdir)) {
-        targetdir = `${xmake_sh_buildir}/${_target_plat}/${_target_arch}/${_target_mode}`
+        targetdir = path_join(xmake_sh_buildir, _target_plat, _target_arch, _target_mode)
     }
     return targetdir
 }
@@ -1195,7 +1195,7 @@ const _get_targetdir = (name: string) => {
 const _get_target_objectdir = (name: string) => {
     let objectdir = _get_target_item(name, "objectdir")
     if (test_z(objectdir)) {
-        objectdir = `${xmake_sh_buildir}/.objs/${name}/${_target_plat}/${_target_arch}/${_target_mode}`
+        objectdir = path_join(xmake_sh_buildir, ".objs", name, _target_plat, _target_arch, _target_mode)
     }
     return objectdir
 }
@@ -1204,7 +1204,7 @@ const _get_target_objectdir = (name: string) => {
 function _get_target_file(name: string) {
     const filename = _get_target_filename(name)
     const targetdir = _get_targetdir(name)
-    const targetfile = `${targetdir}/${filename}`
+    const targetfile = path_join(targetdir, filename)
     return targetfile
 }
 
@@ -1254,7 +1254,7 @@ function _get_target_objectfile(name: string, sourcefile: string) {
         extension = ".obj"
     }
     const objectdir = _get_target_objectdir(name)
-    const objectfile = `${objectdir}/${sourcefile}${extension}`
+    const objectfile = path_join(objectdir, `${sourcefile}${extension}`)
     return objectfile
 }
 
@@ -1411,7 +1411,7 @@ function _get_target_linker_flags(name: string, toolkind: string) {
                 const targetdir = _get_targetdir(name)
                 const subdir = path_relative(targetdir, dep_targetdir)
                 if (test_nz(subdir)) {
-                    rpathdir = `${rpathdir}/${subdir}`
+                    rpathdir = path_join(rpathdir, subdir)
                 }
                 const rpathdirs_flags = _get_target_abstract_flags(dep, toolkind, toolname, "rpathdirs", rpathdir)
                 result = `${result} ${rpathdirs_flags}`
@@ -1490,7 +1490,7 @@ const _add_target_filepaths = (key: string, ...files: string[]) => {
     for (let file of list) {
         file = file.replace(/\?/g, "*")
         if (!path_is_absolute(file)) {
-            file = `${xmake_sh_scriptdir}/${file}`
+            file = path_join(xmake_sh_scriptdir, file)
         }
         let files = []
         if (string_contains(file, "**")) {
@@ -1519,7 +1519,7 @@ const _add_target_installpaths = (key: string, filepattern: string, prefixdir: s
         rootdir = string_split(filepattern, "(", 0)
         rootdir = rootdir.replace(/\/$/, "")
         if (!path_is_absolute(rootdir)) {
-            rootdir = `${xmake_sh_scriptdir}/${rootdir}`
+            rootdir = path_join(xmake_sh_scriptdir, rootdir)
         }
         rootdir = path_relative(xmake_sh_projectdir, rootdir)
         rootdir = rootdir.replace(/\/$/, "")
@@ -1531,7 +1531,7 @@ const _add_target_installpaths = (key: string, filepattern: string, prefixdir: s
 
     // get real path
     if (!path_is_absolute(filepattern)) {
-        filepattern = `${xmake_sh_scriptdir}/${filepattern}`
+        filepattern = path_join(xmake_sh_scriptdir, filepattern)
     }
     let files = []
     if (string_contains(filepattern, "**")) {
@@ -1554,7 +1554,7 @@ const _add_target_installpaths = (key: string, filepattern: string, prefixdir: s
 // set target file path
 function _set_target_filepath(key: string, path: string) {
     if (!path_is_absolute(path)) {
-        path = `${xmake_sh_scriptdir}/${path}`
+        path = path_join(xmake_sh_scriptdir, path)
     }
     path = path_relative(xmake_sh_projectdir, path)
     _set_target_item(_xmake_sh_target_current, key, path)
@@ -1731,7 +1731,7 @@ function add_includedirs(...args: string[]) {
     for (let dir of args) {
         if (test_nq(dir, "{public}")) {
             if (!path_is_absolute(dir)) {
-                dir = `${xmake_sh_scriptdir}/${dir}`
+                dir = path_join(xmake_sh_scriptdir, dir)
             }
             dir = path_relative(xmake_sh_projectdir, dir)
             if (_loading_targets && test_z(_xmake_sh_option_current)) {
@@ -1748,7 +1748,7 @@ function add_includedirs(...args: string[]) {
         for (let dir of args) {
             if (test_nq(dir, "{public}")) {
                 if (!path_is_absolute(dir)) {
-                    dir = `${xmake_sh_scriptdir}/${dir}`
+                    dir = path_join(xmake_sh_scriptdir, dir)
                 }
                 dir = path_relative(xmake_sh_projectdir, dir)
                 if (_loading_targets && test_z(_xmake_sh_option_current)) {
@@ -1807,7 +1807,7 @@ function add_linkdirs(...args: string[]) {
     for (let dir of args) {
         if (test_nq(dir, "{public}")) {
             if (!path_is_absolute(dir)) {
-                dir = `${xmake_sh_scriptdir}/${dir}`
+                dir = path_join(xmake_sh_scriptdir, dir)
             }
             dir = path_relative(xmake_sh_projectdir, dir)
             if (_loading_targets && test_z(_xmake_sh_option_current)) {
@@ -1824,7 +1824,7 @@ function add_linkdirs(...args: string[]) {
         for (let dir of args) {
             if (test_nq(dir, "{public}")) {
                 if (!path_is_absolute(dir)) {
-                    dir = `${xmake_sh_scriptdir}/${dir}`
+                    dir = path_join(xmake_sh_scriptdir, dir)
                 }
                 dir = path_relative(xmake_sh_projectdir, dir)
                 if (_loading_targets && test_z(_xmake_sh_option_current)) {
@@ -1840,7 +1840,7 @@ function add_rpathdirs(...dirs: string[]) {
     if (!_loading_targets) return
     for (let dir of dirs) {
         if (!path_is_absolute(dir)) {
-            dir = `${xmake_sh_scriptdir}/${dir}`
+            dir = path_join(xmake_sh_scriptdir, dir)
         }
         dir = path_relative(xmake_sh_projectdir, dir)
         _add_target_item(_xmake_sh_target_current, "rpathdirs", dir)
@@ -1872,7 +1872,7 @@ function add_frameworks(...args: string[]) {
 function add_frameworkdirs(...dirs: string[]) {
     for (let dir of dirs) {
         if (!path_is_absolute(dir)) {
-            dir = `${xmake_sh_scriptdir}/${dir}`
+            dir = path_join(xmake_sh_scriptdir, dir)
         }
         dir = path_relative(xmake_sh_projectdir, dir)
         if (_loading_targets && test_z(_xmake_sh_option_current)) {
@@ -2859,7 +2859,7 @@ projectdir = xmake_sh_projectdir
 if (path_is_absolute(xmake_sh_buildir)) {
     buildir = xmake_sh_buildir
 } else {
-    buildir = `${xmake_sh_projectdir}/${xmake_sh_buildir}`
+    buildir = path_join(xmake_sh_projectdir, xmake_sh_buildir)
 }
 
 const plat = _target_plat
@@ -2874,7 +2874,7 @@ const _load_targets = () => {
     _xmake_sh_option_current = ""
     _xmake_sh_target_current = ""
     _xmake_sh_toolchain_current = ""
-    const file = `${xmake_sh_projectdir}/xmake.js`
+    const file = path_join(xmake_sh_projectdir, "xmake.js")
     if (fs.existsSync(file)) {
         includes(file)
     } else {
@@ -2945,7 +2945,7 @@ function _generate_configfile(target: string, configfile_in: string) {
         fs.mkdirpSync(configdir)
     }
     const filename = path_basename(configfile_in)
-    const configfile = `${configdir}/${filename}`
+    const configfile = path_join(configdir, filename)
     console.log(`generating ${configfile} ..`)
 
     let patterns: [string | RegExp, string][] = []
@@ -3323,7 +3323,7 @@ function _gmake_add_install_target(target: string) {
     // install header files
     const headerfiles = _get_target_item(target, "headerfiles")
     if (test_nz(headerfiles)) {
-        const includedir = `${installdir}/${_install_includedir_default}`
+        const includedir = path_join(installdir, _install_includedir_default)
         for (let srcheaderfile of string_to_array(headerfiles)) {
             const result = string_split(srcheaderfile, ":")
             const rootdir = result[1]
@@ -3333,12 +3333,12 @@ function _gmake_add_install_target(target: string) {
             if (test_z(filename)) filename = path_filename(srcheaderfile)
             let dstheaderdir = includedir
             if (test_nz(prefixdir)) {
-                dstheaderdir = `${dstheaderdir}/${prefixdir}`
+                dstheaderdir = path_join(dstheaderdir, prefixdir)
             }
-            let dstheaderfile = `${dstheaderdir}/${filename}`
+            let dstheaderfile = path_join(dstheaderdir, filename)
             if (test_nz(rootdir)) {
                 const subfile = path_relative(rootdir, srcheaderfile)
-                dstheaderfile = `${dstheaderdir}/${subfile}`
+                dstheaderfile = path_join(dstheaderdir, subfile)
             }
             dstheaderdir = path_directory(dstheaderfile)
             fs.appendFileSync(xmake_sh_makefile, `\t@mkdir -p ${dstheaderdir}\n`)
@@ -3359,12 +3359,12 @@ function _gmake_add_install_target(target: string) {
             if (test_z(filename)) filename = path_filename(srcinstallfile)
             let dstinstalldir = installdir
             if (test_nz(prefixdir)) {
-                dstinstalldir = `${dstinstalldir}/${prefixdir}`
+                dstinstalldir = path_join(dstinstalldir, prefixdir)
             }
-            let dstinstallfile = `${dstinstalldir}/${filename}`
+            let dstinstallfile = path_join(dstinstalldir, filename)
             if (test_nz(rootdir)) {
                 const subfile = path_relative(rootdir, srcinstallfile)
-                dstinstallfile = `${dstinstalldir}/${subfile}`
+                dstinstallfile = path_join(dstinstalldir, subfile)
             }
             dstinstalldir = path_directory(dstinstallfile)
             fs.appendFileSync(xmake_sh_makefile, `\t@mkdir -p ${dstinstalldir}\n`)
