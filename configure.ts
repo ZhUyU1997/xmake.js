@@ -70,7 +70,7 @@ let projectdir: string
 let buildir: string
 
 function raise(msg: string) {
-    console.error(msg)
+    console.error(new Error(msg).stack)
     process.exit(1)
 }
 
